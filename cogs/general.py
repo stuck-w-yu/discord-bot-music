@@ -5,7 +5,7 @@ class General(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name='setname')
+    @commands.command(name='setname', aliases=['nick'])
     @commands.has_permissions(manage_nicknames=True)
     async def setname(self, ctx, *, name: str):
         """Changes the bot's nickname in the current server."""
@@ -17,7 +17,7 @@ class General(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ An error occurred: {e}")
 
-    @commands.command(name='resetname')
+    @commands.command(name='resetname', aliases=['resetnick'])
     @commands.has_permissions(manage_nicknames=True)
     async def resetname(self, ctx):
         """Resets the bot's nickname to the global username."""
@@ -29,7 +29,7 @@ class General(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ An error occurred: {e}")
 
-    @commands.command(name='dev')
+    @commands.command(name='dev', aliases=['about'])
     async def dev(self, ctx):
         """Shows information about the developer."""
         embed = discord.Embed(title="Halo! 👋", color=discord.Color.gold())
@@ -44,6 +44,50 @@ class General(commands.Cog):
         
         embed.set_footer(text="Jangan lupa follow ya! 😉")
         
+        await ctx.send(embed=embed)
+
+    @commands.command(name='help', aliases=['h'])
+    async def help(self, ctx):
+        """Shows header with commands"""
+        embed = discord.Embed(title="🤖 Bot Help Menu", description="Daftar perintah yang tersedia. Gunakan alias dalam kurung (...) untuk lebih cepat!", color=discord.Color.gold())
+        
+        # Guide
+        guide = (
+            "1. Masuk ke Voice Channel.\n"
+            "2. Ketik `!p <judul lagu>` untuk memutar musik.\n"
+            "3. Nikmati musik dan dapatkan XP!"
+        )
+        embed.add_field(name="📖 Cara Penggunaan", value=guide, inline=False)
+
+        # Music
+        music_cmds = (
+            "`!play (p)` - Memutar lagu/playlist\n"
+            "`!pause (ps)` - Jeda lagu\n"
+            "`!resume (res)` - Lanjut lagu\n"
+            "`!skip (s)` - Lewati lagu\n"
+            "`!stop (st)` - Stop & bersihkan queue\n"
+            "`!queue (q)` - Lihat antrian\n"
+            "`!loop (lp)` - Mode Loop\n"
+            "`!join (j)` / `!leave (l)`"
+        )
+        embed.add_field(name="🎵 Music", value=music_cmds, inline=False)
+        
+        # Leveling
+        level_cmds = (
+            "`!level (lvl)` - Cek level & XP\n"
+            "`!xyzprofile (pf)` - Lihat profil"
+        )
+        embed.add_field(name="📊 Leveling", value=level_cmds, inline=False)
+        
+        # General
+        general_cmds = (
+            "`!dev (about)` - Info Developer\n"
+            "`!setname (nick)` - Ganti nama bot\n"
+            "`!resetname` - Reset nama bot"
+        )
+        embed.add_field(name="⚙️ General", value=general_cmds, inline=False)
+        
+        embed.set_footer(text="Dibuat dengan ❤️ oleh Wahyu Firmansyah")
         await ctx.send(embed=embed)
 
 async def setup(bot):

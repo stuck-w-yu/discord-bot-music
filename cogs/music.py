@@ -15,7 +15,8 @@ class Music(commands.Cog):
             'audioformat': 'mp3',
             'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
             'restrictfilenames': True,
-            'noplaylist': True,
+            'noplaylist': False, # Enable playlists
+            'extract_flat': 'in_playlist', # Fast extraction for playlists
             'nocheckcertificate': True,
             'ignoreerrors': False,
             'logtostderr': False,
@@ -60,21 +61,27 @@ class Music(commands.Cog):
         # Play the entry
         url = entry['url']
         requester_id = entry.get('requester_id')
-        self.current_song[guild_id] = entry # Update current song
+        title = entry.get('title', 'Unknown Title')
         
-        # Extract info
+        # Extract info (Full Extraction if it was flat)
         loop = asyncio.get_event_loop()
         try:
-            # Re-extract info because URLs might expire
-            # Note: For youtube, url might expire, best to re-extract or store id and reconstruct?
-            # Current implementation stores webpage_url, which is persistent. 
+            # Re-extract info using the URL (id-based URL preferred from flat extraction)
             data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(url, download=False))
             
             if 'entries' in data:
                 data = data['entries'][0]
                 
             filename = data['url']
-            title = data['title']
+            title = data.get('title', title) # Update title if we have better one
+            
+            # Update entry with full data for potential looping
+            entry['title'] = title
+            # entry['url'] = data['webpage_url'] # Keep original URL for re-extraction or use stream url? 
+            # If we reuse entry for loop, we want the persistent URL, not the stream URL (filename).
+            # So typically we keep 'url' as the webpage/id url.
+            
+            self.current_song[guild_id] = entry # Update current song
             
             source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
             
@@ -97,10 +104,10 @@ class Music(commands.Cog):
             
         except Exception as e:
             print(f"Error processing song: {e}")
-            await ctx.send("An error occurred while trying to play the song. Playing next...")
+            await ctx.send(f"Error playing **{title}**. Skipping...")
             await self.play_next(ctx)
 
-    @commands.command(name='join')
+    @commands.command(name='join', aliases=['j'])
     async def play_join(self, ctx):
         if ctx.author.voice:
             channel = ctx.author.voice.channel
@@ -112,7 +119,7 @@ class Music(commands.Cog):
         else:
             await ctx.send('You are not in a voice channel!')
 
-    @commands.command(name='leave')
+    @commands.command(name='leave', aliases=['l', 'dc'])
     async def play_leave(self, ctx):
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
@@ -126,7 +133,7 @@ class Music(commands.Cog):
         else:
             await ctx.send('I am not in a voice channel!')
 
-    @commands.command(name='loop')
+    @commands.command(name='loop', aliases=['lp'])
     async def loop(self, ctx):
         """Cycles loop mode: Off -> Current -> All -> Off"""
         current_state = self.loops.get(ctx.guild.id, 0)
@@ -141,7 +148,7 @@ class Music(commands.Cog):
             
         await ctx.send(msg)
 
-    @commands.command(name='play')
+    @commands.command(name='play', aliases=['p'])
     async def play(self, ctx, *, query):
         if not ctx.voice_client:
             try:
@@ -163,60 +170,65 @@ class Music(commands.Cog):
             
             loop = asyncio.get_event_loop()
             data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(query, download=False))
-
-            if 'entries' in data:
-                data = data['entries'][0]
             
+            tracks_to_add = []
+            
+            if 'entries' in data:
+                # Playlist or Search Result
+                if data.get('_type') == 'playlist' and not query.startswith('ytsearch'):
+                    # It's a proper playlist URL
+                    tracks_to_add = data['entries']
+                    await ctx.send(f"Found playlist with {len(tracks_to_add)} songs.")
+                else:
+                    # Search result, just take first
+                    tracks_to_add = [data['entries'][0]]
+            else:
+                # Single Video
+                tracks_to_add = [data]
+
+            if not tracks_to_add:
+                await ctx.send("No songs found.")
+                return
+
             if ctx.guild.id not in self.queues:
                 self.queues[ctx.guild.id] = []
                 
-            entry = {'url': data['webpage_url'], 'title': data['title'], 'requester_id': ctx.author.id}
-
-            if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
-                # Play immediately
-                filename = data['url']
-                title = data['title']
-                
-                # Update current song immediately
-                self.current_song[ctx.guild.id] = entry
-                
-                source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
-                
-                leveling_cog = self.bot.get_cog('Leveling')
-                if leveling_cog:
-                     await leveling_cog.increment_songs_played(ctx.author.id, ctx.guild.id)
-
-                ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop))
-                view = MusicPlayerView(self, ctx)
-                
-                loops = self.loops.get(ctx.guild.id, 0)
-                loop_msg = ""
-                if loops == 1: loop_msg = "🔂"
-                elif loops == 2: loop_msg = "🔁"
-                 
-                await ctx.send(f'Now playing: **{title}** {loop_msg}', view=view)
-            else:
-                # Add to queue
+            added_count = 0
+            for track in tracks_to_add:
+                entry = {
+                    'url': track.get('original_url') or track.get('webpage_url') or track.get('url'),
+                    'title': track.get('title', 'Unknown Title'),
+                    'requester_id': ctx.author.id
+                }
                 self.queues[ctx.guild.id].append(entry)
-                await ctx.send(f'Added to queue: **{data["title"]}**')
+                added_count += 1
+            
+            if added_count == 1:
+                await ctx.send(f"Added to queue: **{tracks_to_add[0].get('title')}**")
+            else:
+                await ctx.send(f"Added **{added_count}** songs to queue.")
+
+            # If not playing, start playing
+            if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                await self.play_next(ctx)
                 
         except Exception as e:
             print(f"Play error: {e}")
             await ctx.send("An error occurred while searching/playing. Make sure it's a valid link or search term.")
 
-    @commands.command(name='pause')
+    @commands.command(name='pause', aliases=['ps'])
     async def pause(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.pause()
             await ctx.send("Paused ⏸️")
 
-    @commands.command(name='resume')
+    @commands.command(name='resume', aliases=['res'])
     async def resume(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_paused():
             ctx.voice_client.resume()
             await ctx.send("Resumed ▶️")
 
-    @commands.command(name='stop')
+    @commands.command(name='stop', aliases=['st'])
     async def stop(self, ctx):
         if ctx.voice_client:
             ctx.voice_client.stop()
@@ -225,15 +237,22 @@ class Music(commands.Cog):
             self.loops[ctx.guild.id] = 0
             await ctx.send("Stopped and cleared queue.")
 
-    @commands.command(name='queue')
+    @commands.command(name='queue', aliases=['q'])
     async def queue(self, ctx):
         if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
-            queue_str = "\n".join([f"{i+1}. {entry['title']}" for i, entry in enumerate(self.queues[ctx.guild.id])])
-            await ctx.send(f"Current Queue:\n{queue_str}")
+            queue_list = self.queues[ctx.guild.id]
+            # Limit queue display to avoiding message length limit
+            max_lines = 10
+            queue_str = "\n".join([f"{i+1}. {entry['title']}" for i, entry in enumerate(queue_list[:max_lines])])
+            
+            if len(queue_list) > max_lines:
+                queue_str += f"\n... and {len(queue_list) - max_lines} more."
+                
+            await ctx.send(f"**Current Queue ({len(queue_list)} songs):**\n{queue_str}")
         else:
             await ctx.send("Queue is empty.")
 
-    @commands.command(name='skip')
+    @commands.command(name='skip', aliases=['s', 'next'])
     async def skip(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.stop()
@@ -300,8 +319,12 @@ class MusicPlayerView(discord.ui.View):
     @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="music_queue")
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.ctx.guild.id in self.cog.queues and self.cog.queues[self.ctx.guild.id]:
-            queue_str = "\n".join([f"{i+1}. {entry['title']}" for i, entry in enumerate(self.cog.queues[self.ctx.guild.id])])
-            await interaction.response.send_message(f"**Current Queue:**\n{queue_str}", ephemeral=True)
+            queue_list = self.cog.queues[self.ctx.guild.id]
+            max_lines = 10
+            queue_str = "\n".join([f"{i+1}. {entry['title']}" for i, entry in enumerate(queue_list[:max_lines])])
+            if len(queue_list) > max_lines:
+                queue_str += f"\n... and {len(queue_list) - max_lines} more."
+            await interaction.response.send_message(f"**Current Queue ({len(queue_list)} songs):**\n{queue_str}", ephemeral=True)
         else:
             await interaction.response.send_message("Queue is empty.", ephemeral=True)
 

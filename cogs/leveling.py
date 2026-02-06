@@ -154,7 +154,7 @@ class Leveling(commands.Cog):
             await self.add_xp(user_id, message.guild.id, choice_xp, db)
             await db.commit()
 
-    @commands.command(name='level')
+    @commands.command(name='level', aliases=['lvl', 'rank'])
     async def level(self, ctx, member: discord.Member = None):
         member = member or ctx.author
         async with aiosqlite.connect('leveling.db') as db:
@@ -228,7 +228,7 @@ class Leveling(commands.Cog):
         embed.set_footer(text="XYZ Profile System • Level Up by chatting & talking!", icon_url=self.bot.user.display_avatar.url)
         return embed
 
-    @commands.command(name='xyzprofile')
+    @commands.command(name='xyzprofile', aliases=['pf', 'profile'])
     async def xyzprofile(self, ctx, member: discord.Member = None):
         member = member or ctx.author
         embed = await self.generate_profile_embed(member)

@@ -42,6 +42,18 @@ class MusicBot(commands.Bot):
 bot = MusicBot()
 
 if __name__ == "__main__":
+    import socket
+    import sys
+    
+    # Single Instance Lock
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 45678))
+    except socket.error:
+        print("\n❌ KESALAHAN: Bot sudah berjalan di terminal lain!")
+        print("➡️  Tutup terminal lain terlebih dahulu sebelum menjalankan yang baru.\n")
+        sys.exit(1)
+
     if not TOKEN or TOKEN == "your_token_here":
         print("ERROR: Please set your DISCORD_TOKEN in the .env file.")
     else:

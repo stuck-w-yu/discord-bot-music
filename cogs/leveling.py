@@ -1,13 +1,25 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import aiosqlite
 import time
 import os
+import random
+
+# Constants
+VOICE_XP_PER_TICK = 1  # 5 seconds = 1 XP => 12 XP/min
+VOICE_TIME_PER_TICK = 5 # 5 seconds
+CHAT_XP_RANGE = (15, 25)
+CHAT_COOLDOWN = 60
+XP_PER_LEVEL = 600
 
 class Leveling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.voice_states = {} # {member_id: join_timestamp}
+        self.chat_cooldowns = {} # {member_id: last_message_timestamp}
+        self.voice_xp_loop.start()
+
+    def cog_unload(self):
+        self.voice_xp_loop.cancel()
 
     async def cog_load(self):
         async with aiosqlite.connect('leveling.db') as db:
@@ -21,13 +33,70 @@ class Leveling(commands.Cog):
                     songs_played INTEGER DEFAULT 0
                 )
             ''')
-            # Attempt migration for existing DBs
             try:
                 await db.execute('ALTER TABLE user_stats ADD COLUMN songs_played INTEGER DEFAULT 0')
             except Exception:
-                pass # Column likely exists
+                pass 
+            
+            # Backfill migration (kept for safety if not run yet)
+            await db.execute('''
+                UPDATE user_stats 
+                SET xp = (total_time / 60) * 10 
+                WHERE xp = 0 AND total_time > 0
+            ''')
             await db.commit()
         print("Leveling Database Initialized")
+
+    def calculate_level(self, xp):
+        return 1 + int(xp / XP_PER_LEVEL)
+
+    async def add_xp(self, user_id, guild_id, amount, db):
+        cursor = await db.execute('SELECT xp, total_time, level FROM user_stats WHERE user_id = ?', (user_id,))
+        row = await cursor.fetchone()
+
+        if row:
+            current_xp, total_time, current_level = row
+            new_xp = current_xp + amount
+            new_level = self.calculate_level(new_xp)
+            await db.execute('UPDATE user_stats SET xp = ?, level = ? WHERE user_id = ?', (new_xp, new_level, user_id))
+            return new_level > current_level
+        else:
+            new_xp = amount
+            new_level = self.calculate_level(new_xp)
+            await db.execute('INSERT INTO user_stats (user_id, guild_id, total_time, level, xp, songs_played) VALUES (?, ?, 0, ?, ?, 0)', 
+                             (user_id, guild_id, new_level, new_xp))
+            return False
+
+    async def update_voice_stats_bulk(self, updates):
+        """
+        Updates updates: list of (user_id, guild_id)
+        Adds VOICE_TIME_PER_TICK seconds and VOICE_XP_PER_TICK XP to each.
+        """
+        if not updates:
+            return
+
+        async with aiosqlite.connect('leveling.db') as db:
+            for user_id, guild_id in updates:
+                # 1. Get current stats
+                cursor = await db.execute('SELECT total_time, xp, level FROM user_stats WHERE user_id = ?', (user_id,))
+                row = await cursor.fetchone()
+                
+                if row:
+                    total_time, xp, level = row
+                    new_time = total_time + VOICE_TIME_PER_TICK
+                    new_xp = xp + VOICE_XP_PER_TICK
+                    new_level = self.calculate_level(new_xp)
+                    
+                    await db.execute('UPDATE user_stats SET total_time = ?, xp = ?, level = ? WHERE user_id = ?', 
+                                     (new_time, new_xp, new_level, user_id))
+                else:
+                    # Initialize
+                    new_xp = VOICE_XP_PER_TICK
+                    new_level = self.calculate_level(new_xp)
+                    await db.execute('INSERT INTO user_stats (user_id, guild_id, total_time, level, xp, songs_played) VALUES (?, ?, ?, ?, ?, 0)', 
+                                     (user_id, guild_id, VOICE_TIME_PER_TICK, new_level, new_xp))
+            
+            await db.commit()
 
     async def increment_songs_played(self, user_id, guild_id):
         async with aiosqlite.connect('leveling.db') as db:
@@ -38,103 +107,83 @@ class Leveling(commands.Cog):
                 songs_played = row[0] + 1
                 await db.execute('UPDATE user_stats SET songs_played = ? WHERE user_id = ?', (songs_played, user_id))
             else:
-                # Initialize user if playing song before joining voice? Unlikely but possible.
                 await db.execute('INSERT INTO user_stats (user_id, guild_id, total_time, level, xp, songs_played) VALUES (?, ?, 0, 1, 0, 1)', (user_id, guild_id))
             
             await db.commit()
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        # Scan for users already in voice channels
-        print("Scanning voice channels...")
+    @tasks.loop(seconds=5)
+    async def voice_xp_loop(self):
+        updates = []
         for guild in self.bot.guilds:
             for channel in guild.voice_channels:
+                if len(channel.members) == 0:
+                    continue
                 for member in channel.members:
-                    if not member.bot and member.id not in self.voice_states:
-                        self.voice_states[member.id] = int(time.time())
-                        print(f"Tracking existing user: {member.name}")
+                    if member.bot:
+                        continue
+                    if member.voice.self_deaf or member.voice.deaf:
+                        # Optional: Don't award XP if deafened?
+                        pass
+                    
+                    updates.append((member.id, guild.id))
+        
+        if updates:
+            await self.update_voice_stats_bulk(updates)
+
+    @voice_xp_loop.before_loop
+    async def before_voice_loop(self):
+        await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member, before, after):
-        if member.bot:
+    async def on_message(self, message):
+        if message.author.bot or not message.guild:
             return
 
-        # Join Voice Channel
-        if not before.channel and after.channel:
-            self.voice_states[member.id] = int(time.time())
-            print(f"DEBUG: {member.name} joined voice.")
+        user_id = message.author.id
+        now = time.time()
 
-        # Leave Voice Channel
-        elif before.channel and not after.channel:
-            if member.id in self.voice_states:
-                join_time = self.voice_states.pop(member.id)
-                duration = int(time.time()) - join_time
-                if duration > 0:
-                     await self.update_stats(member, duration)
-                print(f"DEBUG: {member.name} left voice. Duration: {duration}s")
-            else:
-                 print(f"DEBUG: {member.name} left voice but no join time recorded.")
+        if user_id in self.chat_cooldowns:
+            if now - self.chat_cooldowns[user_id] < CHAT_COOLDOWN:
+                return
+
+        self.chat_cooldowns[user_id] = now
         
-        # Switched channel - technically online time continues, so we do nothing unless we want to track per-channel
-        # If user behaves: Join A -> Switch B -> Leave B.
-        # Join A: record time. Switch B: before.channel=A, after.channel=B. 
-        # Logic above handles !before and after for JOIN, before and !after for LEAVE. 
-        # Switch doesn't trigger either. So timer continues. Correct.
-
-    async def update_stats(self, member, duration):
+        choice_xp = random.randint(*CHAT_XP_RANGE)
+        
         async with aiosqlite.connect('leveling.db') as db:
-            cursor = await db.execute('SELECT total_time FROM user_stats WHERE user_id = ?', (member.id,))
-            row = await cursor.fetchone()
-
-            if row:
-                total_time = row[0] + duration
-            else:
-                total_time = duration
-
-            # Calculate Level: 1 hour = 1 Level. Cap at 100.
-            # Level 1 is 0 hours. Level 2 is 1 hour.
-            # Formula: Level = 1 + floor(hours).
-            level = 1 + int(total_time / 3600)
-            if level > 100: level = 100
-            
-            if row:
-                await db.execute('UPDATE user_stats SET total_time = ?, level = ? WHERE user_id = ?', (total_time, level, member.id))
-            else:
-                await db.execute('INSERT INTO user_stats (user_id, guild_id, total_time, level) VALUES (?, ?, ?, ?)', (member.id, member.guild.id, total_time, level))
-
+            await self.add_xp(user_id, message.guild.id, choice_xp, db)
             await db.commit()
-            
+
     @commands.command(name='level')
     async def level(self, ctx, member: discord.Member = None):
         member = member or ctx.author
         async with aiosqlite.connect('leveling.db') as db:
-            cursor = await db.execute('SELECT total_time, level FROM user_stats WHERE user_id = ?', (member.id,))
+            cursor = await db.execute('SELECT total_time, level, xp FROM user_stats WHERE user_id = ?', (member.id,))
             row = await cursor.fetchone()
 
         if row:
-            total_time, level = row
+            total_time, level, xp = row
             hours = total_time // 3600
             minutes = (total_time % 3600) // 60
             
             embed = discord.Embed(title=f"{member.name}'s Stats", color=discord.Color.gold())
             embed.set_thumbnail(url=member.display_avatar.url)
             embed.add_field(name="Level", value=str(level), inline=True)
-            embed.add_field(name="Total Online Time", value=f"{hours}h {minutes}m", inline=True)
+            embed.add_field(name="XP", value=f"{xp}", inline=True)
+            embed.add_field(name="Total Voice Time", value=f"{hours}h {minutes}m", inline=True)
             
-            # Progress bar to next level?
-            # Next level at (level) * 3600 seconds. 
-            # Current value: total_time.
-            # Next Level Threshold: (hours + 1) * 3600
-            # Wait, level = 1 + total_time/3600.
-            # If total_time = 3599, level 1. Next level at 3600.
-            # Progress: (total_time % 3600) / 3600
+            current_level_floor = (level - 1) * XP_PER_LEVEL
+            next_level_xp = level * XP_PER_LEVEL
             
-            next_level_seconds = 3600
-            current_progress = total_time % 3600
-            percent = int((current_progress / next_level_seconds) * 10) # 0-10 scale
+            xp_progress_in_level = xp - current_level_floor
+            xp_needed_for_level = next_level_xp - current_level_floor 
+            
+            percent = min(10, max(0, int((xp_progress_in_level / xp_needed_for_level) * 10)))
             bar = "🟩" * percent + "⬜" * (10 - percent)
             
-            embed.add_field(name="Progress to Next Level", value=f"{bar} {int((current_progress/next_level_seconds)*100)}%", inline=False)
+            percentage_val = int((xp_progress_in_level / xp_needed_for_level) * 100)
+            
+            embed.add_field(name="Progress to Next Level", value=f"{bar} {percentage_val}%", inline=False)
             
             await ctx.send(embed=embed)
         else:
@@ -153,11 +202,17 @@ class Leveling(commands.Cog):
         hours = total_time // 3600
         minutes = (total_time % 3600) // 60
         
-        next_level_seconds = 3600
-        current_progress = total_time % 3600
-        percent = int((current_progress / next_level_seconds) * 10)
+        current_level_floor = (level - 1) * XP_PER_LEVEL
+        next_level_xp = level * XP_PER_LEVEL
+        
+        xp_progress_in_level = xp - current_level_floor
+        xp_needed_for_level = next_level_xp - current_level_floor
+        
+        if xp_needed_for_level == 0: xp_needed_for_level = 1
+        
+        percent = min(10, max(0, int((xp_progress_in_level / xp_needed_for_level) * 10)))
         bar = "🟩" * percent + "⬜" * (10 - percent)
-        percentage = int((current_progress/next_level_seconds)*100)
+        percentage = int((xp_progress_in_level / xp_needed_for_level) * 100)
 
         embed = discord.Embed(color=discord.Color.from_str("#FD0061"))
         embed.set_author(name=f"{member.name}'s Profile", icon_url=member.display_avatar.url)
@@ -166,10 +221,11 @@ class Leveling(commands.Cog):
         embed.add_field(name="🎤 Voice Time", value=f"**{hours}h {minutes}m**", inline=True)
         embed.add_field(name="🎵 Songs Played", value=f"**{songs_played}**", inline=True)
         embed.add_field(name="🆙 Level", value=f"**{level}**", inline=True)
+        embed.add_field(name="✨ XP", value=f"**{xp}**", inline=True)
         
-        embed.add_field(name="✨ XP Progress", value=f"`[{bar}]` **{percentage}%**", inline=False)
+        embed.add_field(name="XP Progress", value=f"`[{bar}]` **{percentage}%**\n`{xp}/{next_level_xp} XP`", inline=False)
         
-        embed.set_footer(text="XYZ Profile System • Level Up by chatting!", icon_url=self.bot.user.display_avatar.url)
+        embed.set_footer(text="XYZ Profile System • Level Up by chatting & talking!", icon_url=self.bot.user.display_avatar.url)
         return embed
 
     @commands.command(name='xyzprofile')

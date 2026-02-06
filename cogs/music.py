@@ -7,6 +7,8 @@ class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.queues = {}
+        self.loops = {} # 0: Off, 1: Current, 2: All
+        self.current_song = {} # {guild_id: song_entry}
         self.yt_dlp_options = {
             'format': 'bestaudio/best',
             'extractaudio': True,
@@ -29,46 +31,77 @@ class Music(commands.Cog):
         self.ytdl = yt_dlp.YoutubeDL(self.yt_dlp_options)
 
     async def play_next(self, ctx):
-        if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
-            # Get next song
-            entry = self.queues[ctx.guild.id].pop(0)
-            url = entry['url']
-            requester_id = entry.get('requester_id')
+        guild_id = ctx.guild.id
+        loops = self.loops.get(guild_id, 0)
+        previous_song = self.current_song.get(guild_id)
+        
+        # Logic to determine next song
+        entry = None
+        
+        # If Loop Current (1) and we have a previous song, replay it
+        if loops == 1 and previous_song:
+            entry = previous_song
             
-            # Extract info
-            loop = asyncio.get_event_loop()
-            try:
-                data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(url, download=False))
-                
-                if 'entries' in data:
-                    data = data['entries'][0]
-                    
-                filename = data['url']
-                title = data['title']
-                
-                source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
-                
-                if ctx.voice_client and ctx.voice_client.is_connected():
-                     # Increment songs played for the requester
-                     if requester_id:
-                         leveling_cog = self.bot.get_cog('Leveling')
-                         if leveling_cog:
-                             await leveling_cog.increment_songs_played(requester_id, ctx.guild.id)
+        # If Loop All (2) and we have a previous song, re-queue it
+        elif loops == 2 and previous_song:
+            if guild_id not in self.queues:
+                self.queues[guild_id] = []
+            self.queues[guild_id].append(previous_song)
+            
+        # If entry is still None (Loop Off or Loop All processed), get from queue
+        if not entry:
+            if guild_id in self.queues and self.queues[guild_id]:
+                entry = self.queues[guild_id].pop(0)
+            else:
+                # Queue empty
+                self.current_song[guild_id] = None
+                return
 
-                     ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop))
-                     view = MusicPlayerView(self, ctx)
-                     await ctx.send(f'Now playing: **{title}**', view=view)
+        # Play the entry
+        url = entry['url']
+        requester_id = entry.get('requester_id')
+        self.current_song[guild_id] = entry # Update current song
+        
+        # Extract info
+        loop = asyncio.get_event_loop()
+        try:
+            # Re-extract info because URLs might expire
+            # Note: For youtube, url might expire, best to re-extract or store id and reconstruct?
+            # Current implementation stores webpage_url, which is persistent. 
+            data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(url, download=False))
+            
+            if 'entries' in data:
+                data = data['entries'][0]
                 
-            except Exception as e:
-                print(f"Error processing song: {e}")
-                await ctx.send("An error occurred while trying to play the song. Playing next...")
-                await self.play_next(ctx)
-        else:
-            # Queue empty, disconnect after a while or just stay? logic specific
-            pass
+            filename = data['url']
+            title = data['title']
+            
+            source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
+            
+            if ctx.voice_client and ctx.voice_client.is_connected():
+                 # Increment songs played for the requester
+                 if requester_id:
+                     leveling_cog = self.bot.get_cog('Leveling')
+                     if leveling_cog:
+                         await leveling_cog.increment_songs_played(requester_id, ctx.guild.id)
+
+                 ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop))
+                 view = MusicPlayerView(self, ctx)
+                 
+                 # Add loop status to now playing
+                 loop_msg = ""
+                 if loops == 1: loop_msg = "🔂 Loop Current"
+                 elif loops == 2: loop_msg = "🔁 Loop All"
+                 
+                 await ctx.send(f'Now playing: **{title}** {loop_msg}', view=view)
+            
+        except Exception as e:
+            print(f"Error processing song: {e}")
+            await ctx.send("An error occurred while trying to play the song. Playing next...")
+            await self.play_next(ctx)
 
     @commands.command(name='join')
-    async def join(self, ctx):
+    async def play_join(self, ctx):
         if ctx.author.voice:
             channel = ctx.author.voice.channel
             if ctx.voice_client:
@@ -80,35 +113,50 @@ class Music(commands.Cog):
             await ctx.send('You are not in a voice channel!')
 
     @commands.command(name='leave')
-    async def leave(self, ctx):
+    async def play_leave(self, ctx):
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
             if ctx.guild.id in self.queues:
                 del self.queues[ctx.guild.id]
+            if ctx.guild.id in self.current_song:
+                del self.current_song[ctx.guild.id]
+            if ctx.guild.id in self.loops:
+                del self.loops[ctx.guild.id]
             await ctx.send('Left the channel')
         else:
             await ctx.send('I am not in a voice channel!')
+
+    @commands.command(name='loop')
+    async def loop(self, ctx):
+        """Cycles loop mode: Off -> Current -> All -> Off"""
+        current_state = self.loops.get(ctx.guild.id, 0)
+        new_state = (current_state + 1) % 3
+        self.loops[ctx.guild.id] = new_state
+        
+        msg = "Loop disabled ➡️"
+        if new_state == 1:
+            msg = "Looping **Current Song** 🔂"
+        elif new_state == 2:
+            msg = "Looping **Queue** 🔁"
+            
+        await ctx.send(msg)
 
     @commands.command(name='play')
     async def play(self, ctx, *, query):
         if not ctx.voice_client:
             try:
-                await self.join(ctx)
+                if ctx.author.voice:
+                    await ctx.author.voice.channel.connect()
+                else:
+                    await ctx.send("You are not in a voice channel!")
+                    return
             except Exception as e:
                 await ctx.send(f"Could not join channel: {e}")
                 return
-
-        # Double check if join was successful
-        if not ctx.voice_client:
-             return
             
         try:
-            # Basic Spotify handling (search for title)
             if "spotify.com" in query:
-                 # Inform user
                  await ctx.send("Spotify link detected. Searching on YouTube...")
-                 # In a real app we'd fetch the title via API, here we just try searching the URL which might fail or title if provided
-                 # A better fallback for now is to ask user for title or rely on yt-dlp's minimal support
                  pass
 
             await ctx.send(f"Searching for **{query}**...")
@@ -119,7 +167,6 @@ class Music(commands.Cog):
             if 'entries' in data:
                 data = data['entries'][0]
             
-            # If nothing is playing, play immediately
             if ctx.guild.id not in self.queues:
                 self.queues[ctx.guild.id] = []
                 
@@ -129,16 +176,25 @@ class Music(commands.Cog):
                 # Play immediately
                 filename = data['url']
                 title = data['title']
+                
+                # Update current song immediately
+                self.current_song[ctx.guild.id] = entry
+                
                 source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
                 
-                # Increment Songs Played for requester (immediate play)
                 leveling_cog = self.bot.get_cog('Leveling')
                 if leveling_cog:
                      await leveling_cog.increment_songs_played(ctx.author.id, ctx.guild.id)
 
                 ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop))
                 view = MusicPlayerView(self, ctx)
-                await ctx.send(f'Now playing: **{title}**', view=view)
+                
+                loops = self.loops.get(ctx.guild.id, 0)
+                loop_msg = ""
+                if loops == 1: loop_msg = "🔂"
+                elif loops == 2: loop_msg = "🔁"
+                 
+                await ctx.send(f'Now playing: **{title}** {loop_msg}', view=view)
             else:
                 # Add to queue
                 self.queues[ctx.guild.id].append(entry)
@@ -164,8 +220,9 @@ class Music(commands.Cog):
     async def stop(self, ctx):
         if ctx.voice_client:
             ctx.voice_client.stop()
-            if ctx.guild.id in self.queues:
-                self.queues[ctx.guild.id] = []
+            self.queues[ctx.guild.id] = []
+            self.current_song[ctx.guild.id] = None
+            self.loops[ctx.guild.id] = 0
             await ctx.send("Stopped and cleared queue.")
 
     @commands.command(name='queue')
@@ -213,14 +270,29 @@ class MusicPlayerView(discord.ui.View):
         else:
             await interaction.response.send_message("Nothing to skip", ephemeral=True)
 
+    @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.success, custom_id="music_loop")
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Toggle Loop
+        current_state = self.cog.loops.get(self.ctx.guild.id, 0)
+        new_state = (current_state + 1) % 3
+        self.cog.loops[self.ctx.guild.id] = new_state
+        
+        msg = "Loop disabled ➡️"
+        if new_state == 1:
+            msg = "Looping **Current Song** 🔂"
+        elif new_state == 2:
+            msg = "Looping **Queue** 🔁"
+            
+        await interaction.response.send_message(msg, ephemeral=True)
+
     @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="music_stop")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = self.ctx.guild.voice_client
         if vc:
             vc.stop()
-            # Clear queue
-            if self.ctx.guild.id in self.cog.queues:
-                self.cog.queues[self.ctx.guild.id] = []
+            self.cog.queues[self.ctx.guild.id] = []
+            self.cog.current_song[self.ctx.guild.id] = None
+            self.cog.loops[self.ctx.guild.id] = 0
             await interaction.response.send_message("⏹️ Stopped and queue cleared", ephemeral=True)
         else:
             await interaction.response.send_message("Not connected", ephemeral=True)

@@ -29,5 +29,22 @@ class General(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ An error occurred: {e}")
 
+    @commands.command(name='dev')
+    async def dev(self, ctx):
+        """Shows information about the developer."""
+        embed = discord.Embed(title="Halo! 👋", color=discord.Color.gold())
+        
+        embed.description = (
+            "Kenalin, aku **Wahyu Firmansyah**, developer di balik bot ini! 🚀\n"
+            "Aku suka coding dan bikin hal-hal seru di internet.\n\n"
+            "👇 **Stalk me here:**\n"
+            "📸 **Instagram:** [Klik Disini](https://www.instagram.com/stuckw.yu_)\n"
+            "🌐 **Website:** [wahyufirmansyah.my.id](https://wahyufirmansyah.my.id)"
+        )
+        
+        embed.set_footer(text="Jangan lupa follow ya! 😉")
+        
+        await ctx.send(embed=embed)
+
 async def setup(bot):
     await bot.add_cog(General(bot))

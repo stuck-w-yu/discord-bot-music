@@ -140,9 +140,7 @@ class Leveling(commands.Cog):
         else:
              await ctx.send(f"❌ {member.name} has no stats recorded yet.")
 
-    @commands.command(name='xyzprofile')
-    async def xyzprofile(self, ctx, member: discord.Member = None):
-        member = member or ctx.author
+    async def generate_profile_embed(self, member):
         async with aiosqlite.connect('leveling.db') as db:
             cursor = await db.execute('SELECT total_time, level, xp, songs_played FROM user_stats WHERE user_id = ?', (member.id,))
             row = await cursor.fetchone()
@@ -155,18 +153,16 @@ class Leveling(commands.Cog):
         hours = total_time // 3600
         minutes = (total_time % 3600) // 60
         
-        # Next level calculation logic reuse
         next_level_seconds = 3600
         current_progress = total_time % 3600
         percent = int((current_progress / next_level_seconds) * 10)
         bar = "🟩" * percent + "⬜" * (10 - percent)
         percentage = int((current_progress/next_level_seconds)*100)
 
-        embed = discord.Embed(color=discord.Color.from_str("#FD0061")) # Pinkish/Red inspired by music apps
+        embed = discord.Embed(color=discord.Color.from_str("#FD0061"))
         embed.set_author(name=f"{member.name}'s Profile", icon_url=member.display_avatar.url)
         embed.set_thumbnail(url=member.display_avatar.url)
         
-        # Grid Layout
         embed.add_field(name="🎤 Voice Time", value=f"**{hours}h {minutes}m**", inline=True)
         embed.add_field(name="🎵 Songs Played", value=f"**{songs_played}**", inline=True)
         embed.add_field(name="🆙 Level", value=f"**{level}**", inline=True)
@@ -174,8 +170,26 @@ class Leveling(commands.Cog):
         embed.add_field(name="✨ XP Progress", value=f"`[{bar}]` **{percentage}%**", inline=False)
         
         embed.set_footer(text="XYZ Profile System • Level Up by chatting!", icon_url=self.bot.user.display_avatar.url)
-        
-        await ctx.send(embed=embed)
+        return embed
+
+    @commands.command(name='xyzprofile')
+    async def xyzprofile(self, ctx, member: discord.Member = None):
+        member = member or ctx.author
+        embed = await self.generate_profile_embed(member)
+        view = ProfileView(self, member)
+        await ctx.send(embed=embed, view=view)
+
+class ProfileView(discord.ui.View):
+    def __init__(self, cog, member):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.member = member
+
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, custom_id="profile_refresh")
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Refresh the embed
+        embed = await self.cog.generate_profile_embed(self.member)
+        await interaction.response.edit_message(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Leveling(bot))

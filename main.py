@@ -19,6 +19,7 @@ class MusicBot(commands.Bot):
     async def setup_hook(self):
         await self.load_extension('cogs.music')
         await self.load_extension('cogs.leveling')
+        await self.load_extension('cogs.general')
         print("Music and Leveling Cogs Loaded")
 
     async def on_ready(self):

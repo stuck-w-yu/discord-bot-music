@@ -56,7 +56,8 @@ class Music(commands.Cog):
                              await leveling_cog.increment_songs_played(requester_id, ctx.guild.id)
 
                      ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop))
-                     await ctx.send(f'Now playing: **{title}**')
+                     view = MusicPlayerView(self, ctx)
+                     await ctx.send(f'Now playing: **{title}**', view=view)
                 
             except Exception as e:
                 print(f"Error processing song: {e}")
@@ -136,7 +137,8 @@ class Music(commands.Cog):
                      await leveling_cog.increment_songs_played(ctx.author.id, ctx.guild.id)
 
                 ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop))
-                await ctx.send(f'Now playing: **{title}**')
+                view = MusicPlayerView(self, ctx)
+                await ctx.send(f'Now playing: **{title}**', view=view)
             else:
                 # Add to queue
                 self.queues[ctx.guild.id].append(entry)
@@ -173,6 +175,63 @@ class Music(commands.Cog):
             await ctx.send(f"Current Queue:\n{queue_str}")
         else:
             await ctx.send("Queue is empty.")
+
+    @commands.command(name='skip')
+    async def skip(self, ctx):
+        if ctx.voice_client and ctx.voice_client.is_playing():
+            ctx.voice_client.stop()
+            await ctx.send("⏭️ Skipped song.")
+        else:
+            await ctx.send("Nothing to skip.")
+
+class MusicPlayerView(discord.ui.View):
+    def __init__(self, cog, ctx):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.ctx = ctx
+
+    @discord.ui.button(label="⏯️ Pause/Resume", style=discord.ButtonStyle.primary, custom_id="music_pause_resume")
+    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.ctx.guild.voice_client
+        if not vc or not (vc.is_playing() or vc.is_paused()):
+             await interaction.response.send_message("Nothing is playing!", ephemeral=True)
+             return
+        
+        if vc.is_paused():
+            vc.resume()
+            await interaction.response.send_message("▶️ Resumed", ephemeral=True)
+        else:
+            vc.pause()
+            await interaction.response.send_message("⏸️ Paused", ephemeral=True)
+
+    @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id="music_skip")
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.ctx.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+            await interaction.response.send_message("⏭️ Skipped", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nothing to skip", ephemeral=True)
+
+    @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="music_stop")
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.ctx.guild.voice_client
+        if vc:
+            vc.stop()
+            # Clear queue
+            if self.ctx.guild.id in self.cog.queues:
+                self.cog.queues[self.ctx.guild.id] = []
+            await interaction.response.send_message("⏹️ Stopped and queue cleared", ephemeral=True)
+        else:
+            await interaction.response.send_message("Not connected", ephemeral=True)
+
+    @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="music_queue")
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.ctx.guild.id in self.cog.queues and self.cog.queues[self.ctx.guild.id]:
+            queue_str = "\n".join([f"{i+1}. {entry['title']}" for i, entry in enumerate(self.cog.queues[self.ctx.guild.id])])
+            await interaction.response.send_message(f"**Current Queue:**\n{queue_str}", ephemeral=True)
+        else:
+            await interaction.response.send_message("Queue is empty.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Music(bot))

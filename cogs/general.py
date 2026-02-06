@@ -87,7 +87,7 @@ class General(commands.Cog):
         )
         embed.add_field(name="⚙️ General", value=general_cmds, inline=False)
         
-        embed.set_footer(text="Dibuat dengan ❤️ oleh Wahyu Firmansyah")
+        embed.set_footer(text="Dibuat dengan kebanggaan oleh, Wahyu Firmansyah")
         await ctx.send(embed=embed)
 
 async def setup(bot):

@@ -16,6 +16,8 @@ class MusicBot(commands.Bot):
         intents.message_content = True
         # Disable default help command to avoid conflict with custom help
         super().__init__(command_prefix='!', intents=intents, help_command=None)
+        # Explicitly remove help command just in case
+        self.remove_command('help')
 
     async def setup_hook(self):
         await self.load_extension('cogs.music')

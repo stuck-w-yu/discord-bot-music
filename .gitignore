@@ -1,0 +1,21 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Data
+leveling.db
+*.sqlite3
+
+# IDEs
+.vscode/
+.idea/

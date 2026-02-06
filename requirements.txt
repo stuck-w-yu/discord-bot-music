@@ -1,0 +1,9 @@
+discord.py
+yt-dlp
+PyNaCl
+python-dotenv
+ffmpeg-python
+
+brotli
+static-ffmpeg
+aiosqlite

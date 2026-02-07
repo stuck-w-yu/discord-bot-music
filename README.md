@@ -2,7 +2,15 @@
 
 A feature-rich Discord bot for playing music and tracking user levels.
 
-## Features
+## 🍪 Fixing YouTube Sign-in Errors
+If you see errors like `Sign in to confirm you’re not a bot`, you need to provide a `cookies.txt` file.
+1.  Install a browser extension to export cookies (e.g., "Get cookies.txt LOCALLY" for Chrome/Firefox).
+2.  Go to YouTube and make sure you are logged in.
+3.  Use the extension to export your cookies as a file named `cookies.txt`.
+4.  Place `cookies.txt` in the same directory as `main.py`.
+5.  Restart the bot.
+
+## 🛠️ Usage
 - 🎵 High-quality music playback from YouTube & Spotify
 - 📈 Leveling system with text & voice XP
 - ⏯️ Music controls (Play, Pause, Skip, Stop, Queue)

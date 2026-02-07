@@ -34,6 +34,14 @@ class Music(commands.Cog):
             'default_search': 'auto',
             'source_address': '0.0.0.0',
         }
+        
+        # Check for cookies.txt
+        if os.path.exists('cookies.txt'):
+            self.yt_dlp_options['cookiefile'] = 'cookies.txt'
+            print("🍪 Loaded cookies.txt for authentication")
+        else:
+            print("⚠️ cookies.txt not found. YouTube may restrict playback.")
+
         self.ffmpeg_options = {
             'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
             'options': '-vn',

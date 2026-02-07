@@ -391,12 +391,38 @@ class Music(commands.Cog):
             await ctx.send("Queue is empty.")
 
     @commands.command(name='skip', aliases=['s', 'next'])
-    async def skip(self, ctx):
-        if ctx.voice_client and ctx.voice_client.is_playing():
+    async def skip(self, ctx, index: int = None):
+        if not ctx.voice_client or not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
+            return await ctx.send("Nothing is playing.")
+
+        if index is not None:
+            if ctx.guild.id not in self.queues or not self.queues[ctx.guild.id]:
+                return await ctx.send("Queue is empty, cannot skip to specific index.")
+            
+            if index < 1 or index > len(self.queues[ctx.guild.id]):
+                 return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(self.queues[ctx.guild.id])}.")
+            
+            # Skip to specific index:
+            # We want to play the song at index (1-based).
+            # So we remove everything before (index - 1).
+            # e.g. Queue: [A, B, C, D]. !skip 3 (Play C).
+            # Remove A and B. New Queue: [C, D].
+            # Then stop() will create play_next() which pops C.
+            
+            # Wait, play_next pops (0).
+            # If we want to play C (index 3, array index 2).
+            # We want new queue to start with C.
+            # So we remove indexes 0 and 1.
+            # self.queues = self.queues[(index-1):]
+            
+            target_song = self.queues[ctx.guild.id][index-1]
+            self.queues[ctx.guild.id] = self.queues[ctx.guild.id][index-1:]
+            
+            await ctx.send(f"⏭️ Skipped to **{target_song['title']}**.")
+            ctx.voice_client.stop()
+        else:
             ctx.voice_client.stop()
             await ctx.send("⏭️ Skipped song.")
-        else:
-            await ctx.send("Nothing to skip.")
 
     @commands.command(name='volume', aliases=['v', 'vol'])
     async def volume(self, ctx, volume: int):

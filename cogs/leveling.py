@@ -230,7 +230,7 @@ class Leveling(commands.Cog):
         
         embed.add_field(name="XP Progress", value=f"`[{bar}]` **{percentage}%**\n`{xp}/{next_level_xp} XP`", inline=False)
         
-        embed.set_footer(text="XYZ Profile System • Level Up by chatting & talking!", icon_url=self.bot.user.display_avatar.url)
+        embed.set_footer(text="FEDORA Profile System • Level Up by chatting & talking!", icon_url=self.bot.user.display_avatar.url)
         return embed
 
     @commands.command(name='xyzprofile', aliases=['pf', 'profile'])

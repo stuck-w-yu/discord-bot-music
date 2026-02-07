@@ -180,7 +180,7 @@ class Music(commands.Cog):
         try:
             loop = asyncio.get_event_loop()
 
-            if "spotify.com" in query:
+            if "spotify.com" in query or "spotify:" in query:
                 if not self.sp:
                     await ctx.send("Spotify support is not configured (missing credentials).")
                     return

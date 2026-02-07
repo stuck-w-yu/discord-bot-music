@@ -8,3 +8,5 @@ services:
       - ./data:/app/data
     env_file:
       - .env
+    environment:
+      - DATA_DIR=/app/data

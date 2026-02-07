@@ -26,5 +26,8 @@ COPY . .
 # Expose the data volume
 VOLUME ["/app/data"]
 
+# Set default data directory
+ENV DATA_DIR=/app/data
+
 # Command to run the bot
 CMD ["python", "main.py"]

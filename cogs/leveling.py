@@ -23,8 +23,11 @@ class Leveling(commands.Cog):
 
     async def cog_load(self):
         # Ensure data directory exists
-        os.makedirs('data', exist_ok=True)
-        async with aiosqlite.connect('data/leveling.db') as db:
+        self.data_dir = os.getenv('DATA_DIR', 'data')
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.db_path = os.path.join(self.data_dir, 'leveling.db')
+        
+        async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS user_stats (
                     user_id INTEGER PRIMARY KEY,
@@ -77,7 +80,7 @@ class Leveling(commands.Cog):
         if not updates:
             return
 
-        async with aiosqlite.connect('data/leveling.db') as db:
+        async with aiosqlite.connect(self.db_path) as db:
             for user_id, guild_id in updates:
                 # 1. Get current stats
                 cursor = await db.execute('SELECT total_time, xp, level FROM user_stats WHERE user_id = ?', (user_id,))
@@ -101,7 +104,7 @@ class Leveling(commands.Cog):
             await db.commit()
 
     async def increment_songs_played(self, user_id, guild_id):
-        async with aiosqlite.connect('data/leveling.db') as db:
+        async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT songs_played FROM user_stats WHERE user_id = ?', (user_id,))
             row = await cursor.fetchone()
             
@@ -152,14 +155,13 @@ class Leveling(commands.Cog):
         
         choice_xp = random.randint(*CHAT_XP_RANGE)
         
-        async with aiosqlite.connect('data/leveling.db') as db:
+        async with aiosqlite.connect(self.db_path) as db:
             await self.add_xp(user_id, message.guild.id, choice_xp, db)
             await db.commit()
 
-    @commands.command(name='level', aliases=['lvl', 'rank'])
     async def level(self, ctx, member: discord.Member = None):
         member = member or ctx.author
-        async with aiosqlite.connect('data/leveling.db') as db:
+        async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT total_time, level, xp FROM user_stats WHERE user_id = ?', (member.id,))
             row = await cursor.fetchone()
 
@@ -192,7 +194,7 @@ class Leveling(commands.Cog):
              await ctx.send(f"❌ {member.name} has no stats recorded yet.")
 
     async def generate_profile_embed(self, member):
-        async with aiosqlite.connect('data/leveling.db') as db:
+        async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT total_time, level, xp, songs_played FROM user_stats WHERE user_id = ?', (member.id,))
             row = await cursor.fetchone()
 
@@ -237,11 +239,10 @@ class Leveling(commands.Cog):
         view = ProfileView(self, member)
         await ctx.send(embed=embed, view=view)
 
-    @commands.command(name='leaderboard', aliases=['lb', 'top'])
     async def leaderboard(self, ctx):
         """Shows the top 10 users by level in the server."""
         guild_id = ctx.guild.id
-        async with aiosqlite.connect('data/leveling.db') as db:
+        async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
                 SELECT user_id, level, xp 
                 FROM user_stats 
@@ -259,12 +260,8 @@ class Leveling(commands.Cog):
         description = ""
         for i, row in enumerate(rows):
             user_id, level, xp = row
-            member = ctx.guild.get_member(user_id)
-            name = member.display_name if member else f"User {user_id}"
-            
             rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"#{i+1}"
-            
-            description += f"{rank_emoji} **{name}** • Level {level} • {xp} XP\n"
+            description += f"{rank_emoji} <@{user_id}> • Level {level} • {xp} XP\n"
             
         embed.description = description
         embed.set_footer(text="Keep chatting & talking to climb the ranks!")

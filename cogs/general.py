@@ -40,6 +40,7 @@ class General(commands.Cog):
             "👇 **Stalk me here:**\n"
             "📸 **Instagram:** [Klik Disini](https://www.instagram.com/stuckw.yu_)\n"
             "🌐 **Website:** [wahyufirmansyah.my.id](https://wahyufirmansyah.my.id)"
+            "🌐 **Website:** [Fedora Aliansi Digital](https://fedoraweb.site)"
         )
         
         embed.set_footer(text="Jangan lupa follow ya! 😉")

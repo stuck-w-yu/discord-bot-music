@@ -68,6 +68,7 @@ class General(commands.Cog):
             "`!stop (st)` - Stop & bersihkan queue\n"
             "`!queue (q)` - Lihat antrian\n"
             "`!loop (lp)` - Mode Loop\n"
+            "`!volume (v, vol)` - Atur volume (0-100)\n"
             "`!join (j)` / `!leave (l)`"
         )
         embed.add_field(name="🎵 Music", value=music_cmds, inline=False)
@@ -75,7 +76,8 @@ class General(commands.Cog):
         # Leveling
         level_cmds = (
             "`!level (lvl)` - Cek level & XP\n"
-            "`!xyzprofile (pf)` - Lihat profil"
+            "`!xyzprofile (pf)` - Lihat profil\n"
+            "`!leaderboard (lb, top)` - Top 10 users"
         )
         embed.add_field(name="📊 Leveling", value=level_cmds, inline=False)
         

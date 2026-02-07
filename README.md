@@ -55,12 +55,14 @@ Semua perintah menggunakan prefix: `!`
 *   `!resume` : ▶️ Melanjutkan musik yang dijeda.
 *   `!skip` : ⏭️ Melewati lagu saat ini (jika ada).
 *   `!queue` : 📜 Melihat daftar antrian lagu.
+*   `!volume` (v, vol) : 🔊 Mengatur volume musik (0-100).
 *   `!leave` : 🚪 Mengeluarkan bot dari Voice Channel.
 
 ### 💾 Profil & Leveling (User Stats)
 *   `!xyzprofile` : 🌌 **(NEW)** Menampilkan kartu profil retro milikmu.
     *   *Stats: Level, XP, Total Waktu Online, Jumlah Lagu Diputar.*
 *   `!level` : 📶 Cek statistik level sederhanamu.
+*   `!leaderboard` (lb, top) : 🏆 **(NEW)** Menampilkan 10 user dengan level tertinggi.
 
 ---
 

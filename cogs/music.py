@@ -8,6 +8,7 @@ class Music(commands.Cog):
         self.bot = bot
         self.queues = {}
         self.loops = {} # 0: Off, 1: Current, 2: All
+        self.volumes = {} # {guild_id: volume_float}
         self.current_song = {} # {guild_id: song_entry}
         self.yt_dlp_options = {
             'format': 'bestaudio/best',
@@ -84,6 +85,9 @@ class Music(commands.Cog):
             self.current_song[guild_id] = entry # Update current song
             
             source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
+            source = discord.PCMVolumeTransformer(source)
+            source.volume = self.volumes.get(guild_id, 0.5) # Default to 50%
+
             
             if ctx.voice_client and ctx.voice_client.is_connected():
                  # Increment songs played for the requester
@@ -259,6 +263,23 @@ class Music(commands.Cog):
             await ctx.send("⏭️ Skipped song.")
         else:
             await ctx.send("Nothing to skip.")
+
+    @commands.command(name='volume', aliases=['v', 'vol'])
+    async def volume(self, ctx, volume: int):
+        """Sets the volume of the player (0-100)"""
+        if ctx.voice_client is None:
+            return await ctx.send("Not connected to a voice channel.")
+
+        if volume < 0 or volume > 100:
+            return await ctx.send("Volume must be between 0 and 100.")
+
+        self.volumes[ctx.guild.id] = volume / 100
+        
+        if ctx.voice_client.source:
+            if hasattr(ctx.voice_client.source, 'volume'):
+                ctx.voice_client.source.volume = volume / 100
+        
+        await ctx.send(f"🔊 Volume set to **{volume}%**")
 
 class MusicPlayerView(discord.ui.View):
     def __init__(self, cog, ctx):

@@ -235,6 +235,40 @@ class Leveling(commands.Cog):
         view = ProfileView(self, member)
         await ctx.send(embed=embed, view=view)
 
+    @commands.command(name='leaderboard', aliases=['lb', 'top'])
+    async def leaderboard(self, ctx):
+        """Shows the top 10 users by level in the server."""
+        guild_id = ctx.guild.id
+        async with aiosqlite.connect('leveling.db') as db:
+            cursor = await db.execute('''
+                SELECT user_id, level, xp 
+                FROM user_stats 
+                WHERE guild_id = ? 
+                ORDER BY level DESC, xp DESC 
+                LIMIT 10
+            ''', (guild_id,))
+            rows = await cursor.fetchall()
+            
+        if not rows:
+            return await ctx.send("No stats recorded for this server yet.")
+            
+        embed = discord.Embed(title=f"🏆 {ctx.guild.name} Leaderboard", color=discord.Color.gold())
+        
+        description = ""
+        for i, row in enumerate(rows):
+            user_id, level, xp = row
+            member = ctx.guild.get_member(user_id)
+            name = member.display_name if member else f"User {user_id}"
+            
+            rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"#{i+1}"
+            
+            description += f"{rank_emoji} **{name}** • Level {level} • {xp} XP\n"
+            
+        embed.description = description
+        embed.set_footer(text="Keep chatting & talking to climb the ranks!")
+        
+        await ctx.send(embed=embed)
+
 class ProfileView(discord.ui.View):
     def __init__(self, cog, member):
         super().__init__(timeout=None)

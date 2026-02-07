@@ -402,23 +402,18 @@ class Music(commands.Cog):
             if index < 1 or index > len(self.queues[ctx.guild.id]):
                  return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(self.queues[ctx.guild.id])}.")
             
-            # Skip to specific index:
-            # We want to play the song at index (1-based).
-            # So we remove everything before (index - 1).
-            # e.g. Queue: [A, B, C, D]. !skip 3 (Play C).
-            # Remove A and B. New Queue: [C, D].
-            # Then stop() will create play_next() which pops C.
+            # Skip to specific index (Move to Top):
+            # We want to play the song at index (1-based) next.
+            # So we move it to index 0, pushing everything else down.
+            # e.g. Queue: [A, B, C, D]. !skip 3 (Target C).
+            # Pop C. Queue: [A, B, D].
+            # Insert C at 0. Queue: [C, A, B, D].
+            # Then stop() triggers play_next(), which plays C.
             
-            # Wait, play_next pops (0).
-            # If we want to play C (index 3, array index 2).
-            # We want new queue to start with C.
-            # So we remove indexes 0 and 1.
-            # self.queues = self.queues[(index-1):]
+            target_song = self.queues[ctx.guild.id].pop(index-1)
+            self.queues[ctx.guild.id].insert(0, target_song)
             
-            target_song = self.queues[ctx.guild.id][index-1]
-            self.queues[ctx.guild.id] = self.queues[ctx.guild.id][index-1:]
-            
-            await ctx.send(f"⏭️ Skipped to **{target_song['title']}**.")
+            await ctx.send(f"⏭️ Jumping to **{target_song['title']}** (moved to top of queue).")
             ctx.voice_client.stop()
         else:
             ctx.voice_client.stop()

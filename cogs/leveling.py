@@ -22,7 +22,9 @@ class Leveling(commands.Cog):
         self.voice_xp_loop.cancel()
 
     async def cog_load(self):
-        async with aiosqlite.connect('leveling.db') as db:
+        # Ensure data directory exists
+        os.makedirs('data', exist_ok=True)
+        async with aiosqlite.connect('data/leveling.db') as db:
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS user_stats (
                     user_id INTEGER PRIMARY KEY,
@@ -75,7 +77,7 @@ class Leveling(commands.Cog):
         if not updates:
             return
 
-        async with aiosqlite.connect('leveling.db') as db:
+        async with aiosqlite.connect('data/leveling.db') as db:
             for user_id, guild_id in updates:
                 # 1. Get current stats
                 cursor = await db.execute('SELECT total_time, xp, level FROM user_stats WHERE user_id = ?', (user_id,))
@@ -99,7 +101,7 @@ class Leveling(commands.Cog):
             await db.commit()
 
     async def increment_songs_played(self, user_id, guild_id):
-        async with aiosqlite.connect('leveling.db') as db:
+        async with aiosqlite.connect('data/leveling.db') as db:
             cursor = await db.execute('SELECT songs_played FROM user_stats WHERE user_id = ?', (user_id,))
             row = await cursor.fetchone()
             
@@ -150,14 +152,14 @@ class Leveling(commands.Cog):
         
         choice_xp = random.randint(*CHAT_XP_RANGE)
         
-        async with aiosqlite.connect('leveling.db') as db:
+        async with aiosqlite.connect('data/leveling.db') as db:
             await self.add_xp(user_id, message.guild.id, choice_xp, db)
             await db.commit()
 
     @commands.command(name='level', aliases=['lvl', 'rank'])
     async def level(self, ctx, member: discord.Member = None):
         member = member or ctx.author
-        async with aiosqlite.connect('leveling.db') as db:
+        async with aiosqlite.connect('data/leveling.db') as db:
             cursor = await db.execute('SELECT total_time, level, xp FROM user_stats WHERE user_id = ?', (member.id,))
             row = await cursor.fetchone()
 
@@ -190,7 +192,7 @@ class Leveling(commands.Cog):
              await ctx.send(f"❌ {member.name} has no stats recorded yet.")
 
     async def generate_profile_embed(self, member):
-        async with aiosqlite.connect('leveling.db') as db:
+        async with aiosqlite.connect('data/leveling.db') as db:
             cursor = await db.execute('SELECT total_time, level, xp, songs_played FROM user_stats WHERE user_id = ?', (member.id,))
             row = await cursor.fetchone()
 
@@ -239,7 +241,7 @@ class Leveling(commands.Cog):
     async def leaderboard(self, ctx):
         """Shows the top 10 users by level in the server."""
         guild_id = ctx.guild.id
-        async with aiosqlite.connect('leveling.db') as db:
+        async with aiosqlite.connect('data/leveling.db') as db:
             cursor = await db.execute('''
                 SELECT user_id, level, xp 
                 FROM user_stats 

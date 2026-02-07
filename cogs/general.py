@@ -39,7 +39,7 @@ class General(commands.Cog):
             "Aku suka coding dan bikin hal-hal seru di internet.\n\n"
             "👇 **Stalk me here:**\n"
             "📸 **Instagram:** [Klik Disini](https://www.instagram.com/stuckw.yu_)\n"
-            "🌐 **Website:** [wahyufirmansyah.my.id](https://wahyufirmansyah.my.id)"
+            "🌐 **Website:** [wahyufirmansyah.my.id](https://wahyufirmansyah.my.id)\n"
             "🌐 **Website:** [Fedora Aliansi Digital](https://fedoraweb.site)"
         )
         

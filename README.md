@@ -1,79 +1,53 @@
+# Discord Music Bot
 
-# 📼 𝐃𝐈𝐒𝐂𝐎𝐑𝐃 𝐌𝐔𝐒𝐈𝐂 𝐁𝐎𝐓 - 𝚁𝙴𝚃𝚁𝙾 𝙴𝙳𝙸𝚃𝙸𝙾𝙽 📼
+A feature-rich Discord bot for playing music and tracking user levels.
 
-> *Selamat datang di masa depan... atau masa lalu? Nikmati musik berkualitas tinggi dengan sentuhan estetika.*
+## Features
+- 🎵 High-quality music playback from YouTube & Spotify
+- 📈 Leveling system with text & voice XP
+- ⏯️ Music controls (Play, Pause, Skip, Stop, Queue)
+- 📝 User profiles and leaderboards
+- 🐳 Docker support for easy deployment
 
----
+## Setup
+1. Clone the repository
+2. Create a `.env` file with your `DISCORD_TOKEN`
+3. Install dependencies: `pip install -r requirements.txt`
+4. Run the bot: `python main.py`
 
-## 🕹️ 𝐅𝐈𝐓𝐔𝐑 𝐔𝐓𝐀𝐌𝐀 (FEATURES)
+## Docker Deployment (Recommended)
+To ensure data persistence (levels, XP) across restarts, use Docker Compose:
 
-| Fitur | Deskripsi | Status |
-| :--- | :--- | :--- |
-| 🎵 **Hi-Fi Music** | Streaming musik jernih dari YouTube & Spotify. | ✅ **ONLINE** |
-| 📊 **Leveling System** | Naikkan levelmu hanya dengan nongkrong di Voice Channel. | ✅ **ONLINE** |
-| 💾 **XYZ Profile** | Kartu profil canggih yang melacak statistikmu. | ✅ **ONLINE** |
-| 📀 **Queue System** | Atur antrian lagu favoritmu tanpa batas. | ✅ **ONLINE** |
+1. Build and start the container:
+   ```bash
+   docker-compose up -d
+   ```
+2. View logs:
+   ```bash
+   docker-compose logs -f
+   ```
+3. Update the bot:
+   ```bash
+   docker-compose build --no-cache
+   docker-compose up -d
+   ```
 
----
+## Deploying on Coolify (Dockerfile Only)
+If you prefer using just the `Dockerfile`:
 
-## 💾 𝐂𝐀𝐑𝐀 𝐈𝐍𝐒𝐓𝐀𝐋𝐀𝐒𝐈 (INSTALLATION)
+1. Create a new resource -> **Git Repository**.
+2. Select this repository.
+3. **Build Pack**: Select **Dockerfile**.
+4. **CRITICAL**: Go to the **Storage** tab in Coolify.
+   - Add a new volume.
+   - **Volume Name**: `discord-bot-data` (or similar)
+   - **Destination Path**: `/app/data`
+   
+   *One-time setup: If you forgot this step and the bot restarts, levels will be lost.*
 
-Pastikan kamu sudah menginstall **Python 3.8+** dan **FFmpeg**.
-
-1.  **Clone Repository**
-    ```bash
-    git clone https://github.com/username/bot-discord-music.git
-    cd bot-discord-music
-    ```
-
-2.  **Install Dependencies**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-3.  **Konfigurasi Environment**
-    Buat file `.env` dan masukkan Token Discord kamu:
-    ```env
-    DISCORD_TOKEN=masukkan_token_mu_disini
-    ```
-
-4.  **Jalankan Bot**
-    ```bash
-    python main.py
-    ```
-
----
-
-## 🎮 𝐃𝐀𝐅𝐓𝐀𝐑 𝐏𝐄𝐑𝐈𝐍𝐓𝐀𝐇 (COMMANDS)
-
-Semua perintah menggunakan prefix: `!`
-
-### 📻 Musik (Music Station)
-*   `!play <judul/link>` : 📼 Memutar lagu dari YouTube atau Spotify.
-*   `!stop` : 🛑 Menghentikan musik dan membersihkan antrian.
-*   `!pause` : ⏸️ Menjeda musik sementara.
-*   `!resume` : ▶️ Melanjutkan musik yang dijeda.
-*   `!skip` : ⏭️ Melewati lagu saat ini (jika ada).
-*   `!queue` : 📜 Melihat daftar antrian lagu.
-*   `!volume` (v, vol) : 🔊 Mengatur volume musik (0-100).
-*   `!leave` : 🚪 Mengeluarkan bot dari Voice Channel.
-
-### 💾 Profil & Leveling (User Stats)
-*   `!xyzprofile` : 🌌 **(NEW)** Menampilkan kartu profil retro milikmu.
-    *   *Stats: Level, XP, Total Waktu Online, Jumlah Lagu Diputar.*
-*   `!level` : 📶 Cek statistik level sederhanamu.
-*   `!leaderboard` (lb, top) : 🏆 **(NEW)** Menampilkan 10 user dengan level tertinggi.
-
----
-
-## 👾 𝐒𝐈𝐒𝐓𝐄𝐌 𝐋𝐄𝐕𝐄𝐋𝐈𝐍𝐆
-
-**Bagaimana cara kerjanya?**
-Simple! Cukup **Join Voice Channel** manapun. Bot akan secara otomatis menghitung durasi onlinemu.
-
-*   ⏱️ **1 Jam Online = +1 Level**
-*   🎵 **Request Lagu** = Menambah statistik "Songs Played" di profilmu.
-
----
-
-> *Dibuat dengan 💜 dan sedikit sihir 8-bit.*
+## Commands
+- `!play <song>` - Play a song
+- `!skip` - Skip current song
+- `!queue` - Show current queue
+- `!level` - Check your level
+- `!leaderboard` - Server leaderboard

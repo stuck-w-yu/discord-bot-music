@@ -15,6 +15,7 @@ env/
 # Data
 leveling.db
 *.sqlite3
+data/
 
 # IDEs
 .vscode/

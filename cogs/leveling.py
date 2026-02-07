@@ -159,6 +159,7 @@ class Leveling(commands.Cog):
             await self.add_xp(user_id, message.guild.id, choice_xp, db)
             await db.commit()
 
+    @commands.command(name='level', aliases=['lvl', 'rank'])
     async def level(self, ctx, member: discord.Member = None):
         member = member or ctx.author
         async with aiosqlite.connect(self.db_path) as db:
@@ -239,6 +240,7 @@ class Leveling(commands.Cog):
         view = ProfileView(self, member)
         await ctx.send(embed=embed, view=view)
 
+    @commands.command(name='leaderboard', aliases=['lb', 'top'])
     async def leaderboard(self, ctx):
         """Shows the top 10 users by level in the server."""
         guild_id = ctx.guild.id

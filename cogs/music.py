@@ -13,6 +13,7 @@ class Music(commands.Cog):
         self.loops = {} # 0: Off, 1: Current, 2: All
         self.volumes = {} # {guild_id: volume_float}
         self.current_song = {} # {guild_id: song_entry}
+        self.last_np_msg = {} # {guild_id: message}
         self.yt_dlp_options = {
             'format': 'bestaudio/best',
             'extractaudio': True,
@@ -116,7 +117,15 @@ class Music(commands.Cog):
                  if loops == 1: loop_msg = "🔂 Loop Current"
                  elif loops == 2: loop_msg = "🔁 Loop All"
                  
-                 await ctx.send(f'Now playing: **{title}** {loop_msg}', view=view)
+                 # Delete previous "Now Playing" message if it exists
+                 if guild_id in self.last_np_msg and self.last_np_msg[guild_id]:
+                     try:
+                        await self.last_np_msg[guild_id].delete()
+                     except:
+                        pass # Message might already be deleted
+
+                 msg = await ctx.send(f'Now playing: **{title}** {loop_msg}', view=view)
+                 self.last_np_msg[guild_id] = msg
             
         except Exception as e:
             print(f"Error processing song: {e}")
@@ -145,6 +154,8 @@ class Music(commands.Cog):
                 del self.current_song[ctx.guild.id]
             if ctx.guild.id in self.loops:
                 del self.loops[ctx.guild.id]
+            if ctx.guild.id in self.last_np_msg:
+                del self.last_np_msg[ctx.guild.id]
             await ctx.send('Left the channel')
         else:
             await ctx.send('I am not in a voice channel!')
@@ -341,6 +352,13 @@ class Music(commands.Cog):
             self.queues[ctx.guild.id] = []
             self.current_song[ctx.guild.id] = None
             self.loops[ctx.guild.id] = 0
+            
+            # Clean up the last "Now playing" message reference, but maybe not delete it on stop?
+            # Or should we? The user asked for "when next song plays".
+            # I'll just clear the reference so we don't try to delete an old one next time we restart.
+            if ctx.guild.id in self.last_np_msg:
+                del self.last_np_msg[ctx.guild.id]
+
             await ctx.send("Stopped and cleared queue.")
 
     @commands.command(name='queue', aliases=['q'])

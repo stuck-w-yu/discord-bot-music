@@ -10,6 +10,15 @@ If you see errors like `Sign in to confirm you’re not a bot`, you need to prov
 4.  Place `cookies.txt` in the same directory as `main.py`.
 5.  Restart the bot.
 
+### ☁️ Deploying on Coolify / Docker
+If you are deploying on Coolify or Docker, you can use an Environment Variable instead of a file:
+1.  Open your project in Coolify.
+2.  Go to **Environment Variables**.
+3.  Add a new variable:
+    -   **Key**: `YOUTUBE_COOKIES`
+    -   **Value**: (Paste the entire content of your `cookies.txt` file here)
+4.  Redeploy/Restart the bot.
+
 ## 🛠️ Usage
 - 🎵 High-quality music playback from YouTube & Spotify
 - 📈 Leveling system with text & voice XP

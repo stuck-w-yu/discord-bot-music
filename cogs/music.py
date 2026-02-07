@@ -35,6 +35,12 @@ class Music(commands.Cog):
             'source_address': '0.0.0.0',
         }
         
+        # Check for cookies from Env Var (Coolify/Docker support)
+        if os.getenv('YOUTUBE_COOKIES'):
+            with open('cookies.txt', 'w') as f:
+                f.write(os.getenv('YOUTUBE_COOKIES'))
+            print("🍪 Created cookies.txt from Environment Variable")
+
         # Check for cookies.txt
         if os.path.exists('cookies.txt'):
             self.yt_dlp_options['cookiefile'] = 'cookies.txt'

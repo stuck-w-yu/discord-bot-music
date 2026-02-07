@@ -5,6 +5,12 @@ class General(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @commands.command(name='ping', aliases=['latency'])
+    async def ping(self, ctx):
+        """Checks the bot's latency."""
+        latency = round(self.bot.latency * 1000)
+        await ctx.send(f'🏓 Pong! Latency: **{latency}ms**')
+
     @commands.command(name='setname', aliases=['nick'])
     @commands.has_permissions(manage_nicknames=True)
     async def setname(self, ctx, *, name: str):
@@ -86,7 +92,8 @@ class General(commands.Cog):
         general_cmds = (
             "`!dev (about)` - Info Developer\n"
             "`!setname (nick)` - Ganti nama bot\n"
-            "`!resetname` - Reset nama bot"
+            "`!resetname` - Reset nama bot\n"
+            "`!ping` - Cek latency"
         )
         embed.add_field(name="⚙️ General", value=general_cmds, inline=False)
         

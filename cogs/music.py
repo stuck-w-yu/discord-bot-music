@@ -8,6 +8,21 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import time
 import datetime
 
+import datetime
+
+# Custom Check
+def ensure_voice():
+    async def predicate(ctx):
+        if not ctx.author.voice:
+            raise commands.CommandError("You need to be in a voice channel to use this command.")
+        
+        if ctx.voice_client:
+            if ctx.voice_client.channel != ctx.author.voice.channel:
+                raise commands.CommandError("You need to be in the same voice channel as the bot to use this command.")
+        
+        return True
+    return commands.check(predicate)
+
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -199,6 +214,7 @@ class Music(commands.Cog):
         await ctx.send(msg)
 
     @commands.command(name='play', aliases=['p'])
+    @ensure_voice()
     async def play(self, ctx, *, query):
         if not ctx.voice_client:
             try:
@@ -357,6 +373,7 @@ class Music(commands.Cog):
             await ctx.send("An error occurred while searching/playing. Make sure it's a valid link or search term.")
 
     @commands.command(name='pause', aliases=['ps'])
+    @ensure_voice()
     async def pause(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.pause()
@@ -364,6 +381,7 @@ class Music(commands.Cog):
             await ctx.send("Paused ⏸️")
 
     @commands.command(name='resume', aliases=['res'])
+    @ensure_voice()
     async def resume(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_paused():
             ctx.voice_client.resume()
@@ -375,6 +393,7 @@ class Music(commands.Cog):
             await ctx.send("Resumed ▶️")
 
     @commands.command(name='stop', aliases=['st'])
+    @ensure_voice()
     async def stop(self, ctx):
         if ctx.voice_client:
             ctx.voice_client.stop()
@@ -391,6 +410,7 @@ class Music(commands.Cog):
             await ctx.send("Stopped and cleared queue.")
 
     @commands.command(name='queue', aliases=['q'])
+    @ensure_voice()
     async def queue(self, ctx):
         if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
             queue_list = self.queues[ctx.guild.id]
@@ -405,6 +425,7 @@ class Music(commands.Cog):
             await ctx.send("Queue is empty.")
 
     @commands.command(name='skip', aliases=['s', 'next'])
+    @ensure_voice()
     async def skip(self, ctx, index: int = None):
         if not ctx.voice_client or not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
             return await ctx.send("Nothing is playing.")
@@ -451,6 +472,7 @@ class Music(commands.Cog):
         await ctx.send(f"🔊 Volume set to **{volume}%**")
 
     @commands.command(name='nowplaying', aliases=['np', 'current'])
+    @ensure_voice()
     async def now_playing(self, ctx):
         """Shows the currently playing song with progress bar"""
         guild_id = ctx.guild.id

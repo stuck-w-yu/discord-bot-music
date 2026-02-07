@@ -2,6 +2,9 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
+import os
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -31,6 +34,15 @@ class Music(commands.Cog):
             'options': '-vn',
         }
         self.ytdl = yt_dlp.YoutubeDL(self.yt_dlp_options)
+        
+        # Spotify Init
+        client_id = os.getenv('SPOTIPY_CLIENT_ID')
+        client_secret = os.getenv('SPOTIPY_CLIENT_SECRET')
+        if client_id and client_secret:
+            self.sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=client_id, client_secret=client_secret))
+        else:
+            self.sp = None
+            print("Spotify credentials not found. Spotify support disabled.")
 
     async def play_next(self, ctx):
         guild_id = ctx.guild.id
@@ -166,13 +178,103 @@ class Music(commands.Cog):
                 return
             
         try:
+            loop = asyncio.get_event_loop()
+
             if "spotify.com" in query:
-                 await ctx.send("Spotify link detected. Searching on YouTube...")
-                 pass
+                if not self.sp:
+                    await ctx.send("Spotify support is not configured (missing credentials).")
+                    return
+
+                await ctx.send("Spotify link detected. Fetching tracks...")
+                
+                tracks_to_search = []
+                
+                try:
+                    if "track" in query:
+                        track = self.sp.track(query)
+                        tracks_to_search.append(f"{track['artists'][0]['name']} - {track['name']}")
+                    
+                    elif "playlist" in query:
+                        results = self.sp.playlist_tracks(query)
+                        tracks = results['items']
+                        while results['next']:
+                            results = self.sp.next(results)
+                            tracks.extend(results['items'])
+                        
+                        for item in tracks:
+                            track = item.get('track')
+                            if track:
+                                tracks_to_search.append(f"{track['artists'][0]['name']} - {track['name']}")
+                                
+                    elif "album" in query:
+                        results = self.sp.album_tracks(query)
+                        tracks = results['items']
+                        while results['next']:
+                            results = self.sp.next(results)
+                            tracks.extend(results['items'])
+                        
+                        for track in tracks:
+                            tracks_to_search.append(f"{track['artists'][0]['name']} - {track['name']}")
+                            
+                except Exception as e:
+                    await ctx.send(f"Error fetching Spotify data: {e}")
+                    return
+
+                if not tracks_to_search:
+                     await ctx.send("No tracks found in Spotify link.")
+                     return
+
+                await ctx.send(f"Found {len(tracks_to_search)} tracks. Adding to queue...")
+
+                # Optimization: Process first track immediately to start playing, then add rest
+                first_query = tracks_to_search[0]
+                
+                try:
+                    data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(f"ytsearch:{first_query}", download=False))
+                    if 'entries' in data and data['entries']:
+                        track_data = data['entries'][0]
+                        entry = {
+                            'url': track_data.get('webpage_url'),
+                            'title': track_data.get('title', first_query),
+                            'requester_id': ctx.author.id
+                        }
+                        if ctx.guild.id not in self.queues:
+                            self.queues[ctx.guild.id] = []
+                        self.queues[ctx.guild.id].append(entry)
+                        
+                        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                            await self.play_next(ctx)
+                    else:
+                         await ctx.send(f"Could not find **{first_query}** on YouTube.")
+
+                except Exception as e:
+                    print(f"Failed to find first track {first_query}: {e}")
+
+                # Process remaining tracks in background
+                async def add_remaining_tracks():
+                    added_count = 1 
+                    for search_query in tracks_to_search[1:]:
+                        try:
+                            data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(f"ytsearch:{search_query}", download=False))
+                            if 'entries' in data and data['entries']:
+                                track_data = data['entries'][0]
+                                entry = {
+                                    'url': track_data.get('webpage_url'),
+                                    'title': track_data.get('title', search_query),
+                                    'requester_id': ctx.author.id
+                                }
+                                self.queues[ctx.guild.id].append(entry)
+                                added_count += 1
+                        except Exception as e:
+                            print(f"Failed to find {search_query}: {e}")
+                            continue
+                            
+                    await ctx.send(f"✅ Finished adding all {added_count} Spotify tracks to queue.")
+
+                asyncio.create_task(add_remaining_tracks())
+                return
 
             await ctx.send(f"Searching for **{query}**...")
-            
-            loop = asyncio.get_event_loop()
             data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(query, download=False))
             
             tracks_to_add = []

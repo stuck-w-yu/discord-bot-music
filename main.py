@@ -9,6 +9,8 @@ load_dotenv()
 static_ffmpeg.add_paths()
 
 TOKEN = os.getenv('DISCORD_TOKEN')
+SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
 
 class MusicBot(commands.Bot):
     def __init__(self):

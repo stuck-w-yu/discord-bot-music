@@ -380,14 +380,13 @@ class Music(commands.Cog):
     async def queue(self, ctx):
         if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
             queue_list = self.queues[ctx.guild.id]
-            # Limit queue display to avoiding message length limit
-            max_lines = 10
-            queue_str = "\n".join([f"{i+1}. {entry['title']}" for i, entry in enumerate(queue_list[:max_lines])])
             
-            if len(queue_list) > max_lines:
-                queue_str += f"\n... and {len(queue_list) - max_lines} more."
-                
-            await ctx.send(f"**Current Queue ({len(queue_list)} songs):**\n{queue_str}")
+            # Use Pagination View
+            view = QueuePaginationView(ctx, queue_list)
+            embed = view.get_embed()
+            view.update_buttons()
+            
+            await ctx.send(embed=embed, view=view)
         else:
             await ctx.send("Queue is empty.")
 
@@ -511,6 +510,7 @@ class MusicPlayerView(discord.ui.View):
             
         await interaction.response.send_message(msg, ephemeral=True)
 
+
     @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="music_stop")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = self.ctx.guild.voice_client
@@ -537,3 +537,56 @@ class MusicPlayerView(discord.ui.View):
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
+
+class QueuePaginationView(discord.ui.View):
+    def __init__(self, ctx, queue_list):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.queue_list = queue_list
+        self.current_page = 0
+        self.items_per_page = 10
+        self.total_pages = (len(queue_list) - 1) // self.items_per_page + 1
+
+    def update_buttons(self):
+        self.children[0].disabled = self.current_page == 0
+        self.children[1].disabled = self.current_page == self.total_pages - 1
+
+    def get_embed(self):
+        start = self.current_page * self.items_per_page
+        end = start + self.items_per_page
+        current_items = self.queue_list[start:end]
+        
+        queue_str = "\n".join([f"{start + i + 1}. {entry['title']}" for i, entry in enumerate(current_items)])
+        
+        embed = discord.Embed(title=f"Current Queue ({len(self.queue_list)} songs)", description=queue_str, color=discord.Color.blue())
+        embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages}")
+        return embed
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.primary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = self.get_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = self.get_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+            
+    async def on_timeout(self):
+        # Optional: Disable buttons on timeout
+        for child in self.children:
+            child.disabled = True
+        # Note: We can't edit the message easily without reference, 
+        # but interaction.message is available in button callbacks.
+        # Here we usually just pass.
+        pass

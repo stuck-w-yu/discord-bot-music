@@ -46,8 +46,16 @@ If you prefer using just the `Dockerfile`:
    *One-time setup: If you forgot this step and the bot restarts, levels will be lost.*
 
 ## Commands
-- `!play <song>` - Play a song
-- `!skip` - Skip current song
-- `!queue` - Show current queue
-- `!level` - Check your level
-- `!leaderboard` - Server leaderboard
+- `!play <song/url>` (p) - Play a song or playlist (YouTube/Spotify)
+- `!pause` (ps) - Pause playback
+- `!resume` (res) - Resume playback
+- `!nowplaying` (np) - Show current song and progress
+- `!skip` (s) - Skip current song
+- `!stop` (st) - Stop playback and clear queue
+- `!queue` (q) - Show current queue
+- `!loop` (lp) - Toggle loop mode (Off -> Current -> Queue)
+- `!volume <0-100>` (v) - Set volume
+- `!join` (j) / `!leave` (l) - Join/Leave voice channel
+- `!level` (lvl) - Check your level and XP
+- `!leaderboard` (lb) - View server leaderboard
+- `!xyzprofile` (pf) - View rich profile card

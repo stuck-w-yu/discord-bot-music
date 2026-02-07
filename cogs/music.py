@@ -5,6 +5,8 @@ import asyncio
 import os
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+import time
+import datetime
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -14,6 +16,8 @@ class Music(commands.Cog):
         self.volumes = {} # {guild_id: volume_float}
         self.current_song = {} # {guild_id: song_entry}
         self.last_np_msg = {} # {guild_id: message}
+        self.start_times = {} # {guild_id: time.time()}
+        self.pause_starts = {} # {guild_id: time.time()}
         self.yt_dlp_options = {
             'format': 'bestaudio/best',
             'extractaudio': True,
@@ -89,13 +93,18 @@ class Music(commands.Cog):
             filename = data['url']
             title = data.get('title', title) # Update title if we have better one
             
-            # Update entry with full data for potential looping
+            # Update entry with full data for potential looping (and now playing info)
             entry['title'] = title
+            entry['duration'] = data.get('duration')
+            entry['thumbnail'] = data.get('thumbnail')
             # entry['url'] = data['webpage_url'] # Keep original URL for re-extraction or use stream url? 
             # If we reuse entry for loop, we want the persistent URL, not the stream URL (filename).
             # So typically we keep 'url' as the webpage/id url.
             
             self.current_song[guild_id] = entry # Update current song
+            self.start_times[guild_id] = time.time()
+            if guild_id in self.pause_starts:
+                del self.pause_starts[guild_id]
             
             source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
             source = discord.PCMVolumeTransformer(source)
@@ -337,12 +346,18 @@ class Music(commands.Cog):
     async def pause(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.pause()
+            self.pause_starts[ctx.guild.id] = time.time()
             await ctx.send("Paused ⏸️")
 
     @commands.command(name='resume', aliases=['res'])
     async def resume(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_paused():
             ctx.voice_client.resume()
+            if ctx.guild.id in self.pause_starts:
+                paused_duration = time.time() - self.pause_starts[ctx.guild.id]
+                if ctx.guild.id in self.start_times:
+                    self.start_times[ctx.guild.id] += paused_duration
+                del self.pause_starts[ctx.guild.id]
             await ctx.send("Resumed ▶️")
 
     @commands.command(name='stop', aliases=['st'])
@@ -400,6 +415,57 @@ class Music(commands.Cog):
                 ctx.voice_client.source.volume = volume / 100
         
         await ctx.send(f"🔊 Volume set to **{volume}%**")
+
+    @commands.command(name='nowplaying', aliases=['np', 'current'])
+    async def now_playing(self, ctx):
+        """Shows the currently playing song with progress bar"""
+        guild_id = ctx.guild.id
+        
+        if guild_id not in self.current_song or not self.current_song[guild_id]:
+            return await ctx.send("Nothing is currently playing.")
+            
+        entry = self.current_song[guild_id]
+        
+        # Calculate progress
+        current_time = 0
+        if guild_id in self.start_times:
+            if guild_id in self.pause_starts:
+                 # If currently paused, use time up to pause
+                 current_time = self.pause_starts[guild_id] - self.start_times[guild_id]
+            else:
+                 current_time = time.time() - self.start_times[guild_id]
+        
+        duration = entry.get('duration', 0)
+        
+        # Create Bar
+        # [▬▬▬▬▬▬▬▬▬🔘▬▬▬▬▬▬▬▬]
+        bar_length = 20
+        if duration > 0:
+            progress = min(current_time / duration, 1.0)
+            filled_len = int(progress * bar_length)
+            bar = "▬" * filled_len + "🔘" + "▬" * (bar_length - filled_len)
+            
+            # Identify timestamps
+            current_str = str(datetime.timedelta(seconds=int(current_time)))
+            total_str = str(datetime.timedelta(seconds=int(duration)))
+            time_str = f"{current_str} / {total_str}"
+        else:
+            bar = "🔘" + "▬" * bar_length
+            current_str = str(datetime.timedelta(seconds=int(current_time)))
+            time_str = f"{current_str} / Live"
+            
+        embed = discord.Embed(title="Now Playing 🎵", description=f"[{entry['title']}]({entry.get('url', '')})", color=discord.Color.blue())
+        
+        if entry.get('thumbnail'):
+            embed.set_thumbnail(url=entry['thumbnail'])
+            
+        embed.add_field(name="Progress", value=f"`{time_str}`\n`{bar}`", inline=False)
+        
+        requester = ctx.guild.get_member(entry.get('requester_id'))
+        req_name = requester.display_name if requester else "Unknown"
+        embed.set_footer(text=f"Requested by {req_name}", icon_url=requester.display_avatar.url if requester else None)
+        
+        await ctx.send(embed=embed)
 
 class MusicPlayerView(discord.ui.View):
     def __init__(self, cog, ctx):

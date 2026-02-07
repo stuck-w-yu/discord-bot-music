@@ -3,7 +3,7 @@ FROM python:3.11-slim-bookworm
 
 # Install system dependencies
 # ffmpeg is crucial for music functionality
-# git is often needed for installing dependencies from git repositories
+# git is often needed for installing dependencies from git repositories  
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ffmpeg \

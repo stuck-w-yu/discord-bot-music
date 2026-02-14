@@ -76,3 +76,4 @@ If you prefer using just the `Dockerfile`:
 - `!level` (lvl) - Check your level and XP
 - `!leaderboard` (lb) - View server leaderboard
 - `!xyzprofile` (pf) - View rich profile card
+- `!svlogs` (serverstats) - View server statistics & system info

@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-import psutil
+import asyncio
 import platform
 import datetime
 import time
@@ -61,42 +61,62 @@ class General(commands.Cog):
     @commands.command(name='svlogs', aliases=['serverstats', 'sysinfo'])
     async def svlogs(self, ctx):
         """Displays server system statistics."""
-        async with ctx.typing():
-            # System Info
-            uname = platform.uname()
-            system_os = f"{uname.system} {uname.release}"
-            node_name = uname.node
-            python_version = platform.python_version()
-            
-            # CPU
-            cpu_usage = psutil.cpu_percent(interval=1)
-            cpu_count = psutil.cpu_count(logical=True)
-            
-            # Memory
-            svmem = psutil.virtual_memory()
-            mem_total = f"{svmem.total / (1024 ** 3):.2f} GB"
-            mem_available = f"{svmem.available / (1024 ** 3):.2f} GB"
-            mem_used = f"{svmem.used / (1024 ** 3):.2f} GB"
-            mem_percent = svmem.percent
+        # Check if psutil is available
+        try:
+            import psutil
+        except ImportError:
+            return await ctx.send("❌ Error: `psutil` library is not installed. Please install it using `pip install psutil`.")
 
-            # Disk
-            disk_usage = psutil.disk_usage('/')
-            disk_total = f"{disk_usage.total / (1024 ** 3):.2f} GB"
-            disk_used = f"{disk_usage.used / (1024 ** 3):.2f} GB"
-            disk_percent = disk_usage.percent
+        async with ctx.typing():
+            # Run blocking psutil calls in executor
+            def get_stats():
+                # System Info
+                uname = platform.uname()
+                system_os = f"{uname.system} {uname.release}"
+                node_name = uname.node
+                python_version = platform.python_version()
+                
+                # CPU (blocking)
+                cpu_usage = psutil.cpu_percent(interval=1)
+                cpu_count = psutil.cpu_count(logical=True)
+                
+                # Memory
+                svmem = psutil.virtual_memory()
+                mem_total = f"{svmem.total / (1024 ** 3):.2f} GB"
+                mem_available = f"{svmem.available / (1024 ** 3):.2f} GB"
+                mem_used = f"{svmem.used / (1024 ** 3):.2f} GB"
+                mem_percent = svmem.percent
+                
+                # Disk
+                disk_usage = psutil.disk_usage('/')
+                disk_total = f"{disk_usage.total / (1024 ** 3):.2f} GB"
+                disk_used = f"{disk_usage.used / (1024 ** 3):.2f} GB"
+                disk_percent = disk_usage.percent
+                
+                # Uptime
+                boot_time_timestamp = psutil.boot_time()
+                bt = datetime.datetime.fromtimestamp(boot_time_timestamp)
+                uptime = datetime.datetime.now() - bt
+                
+                return {
+                    "os": system_os, "node": node_name, "py": python_version,
+                    "cpu_u": cpu_usage, "cpu_c": cpu_count,
+                    "mem_used": mem_used, "mem_total": mem_total, "mem_p": mem_percent,
+                    "disk_used": disk_used, "disk_total": disk_total, "disk_p": disk_percent,
+                    "uptime": str(uptime).split('.')[0]
+                }
             
-            # Uptime
-            boot_time_timestamp = psutil.boot_time()
-            bt = datetime.datetime.fromtimestamp(boot_time_timestamp)
-            uptime = datetime.datetime.now() - bt
+            # Execute in thread pool to avoid blocking event loop
+            loop = asyncio.get_event_loop()
+            stats = await loop.run_in_executor(None, get_stats)
             
             embed = discord.Embed(title="🖥️ Server Statistics", color=discord.Color.from_rgb(46, 204, 113))
             
-            embed.add_field(name="💻 System Info", value=f"**OS**: {system_os}\n**Node**: {node_name}\n**Python**: {python_version}", inline=False)
-            embed.add_field(name="🧠 CPU Usage", value=f"**Usage**: {cpu_usage}%\n**Cores**: {cpu_count}", inline=True)
-            embed.add_field(name="💾 RAM Usage", value=f"**Used**: {mem_used} / {mem_total} ({mem_percent}%)", inline=True)
-            embed.add_field(name="💿 Disk Usage", value=f"**Used**: {disk_used} / {disk_total} ({disk_percent}%)", inline=True)
-            embed.add_field(name="⏱️ Uptime", value=str(uptime).split('.')[0], inline=False)
+            embed.add_field(name="💻 System Info", value=f"**OS**: {stats['os']}\n**Node**: {stats['node']}\n**Python**: {stats['py']}", inline=False)
+            embed.add_field(name="🧠 CPU Usage", value=f"**Usage**: {stats['cpu_u']}%\n**Cores**: {stats['cpu_c']}", inline=True)
+            embed.add_field(name="💾 RAM Usage", value=f"**Used**: {stats['mem_used']} / {stats['mem_total']} ({stats['mem_p']}%)", inline=True)
+            embed.add_field(name="💿 Disk Usage", value=f"**Used**: {stats['disk_used']} / {stats['disk_total']} ({stats['disk_p']}%)", inline=True)
+            embed.add_field(name="⏱️ Uptime", value=stats['uptime'], inline=False)
             
             embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
             
@@ -143,7 +163,8 @@ class General(commands.Cog):
             "`!dev (about)` - Info Developer\n"
             "`!setname (nick)` - Ganti nama bot\n"
             "`!resetname` - Reset nama bot\n"
-            "`!ping` - Cek latency"
+            "`!ping` - Cek latency\n"
+            "`!svlogs (serverstats)` - Cek statistik server"
         )
         embed.add_field(name="⚙️ General", value=general_cmds, inline=False)
         

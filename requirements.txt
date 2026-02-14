@@ -8,3 +8,4 @@ brotli
 static-ffmpeg
 aiosqlite
 spotipy
+psutil

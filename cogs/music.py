@@ -8,7 +8,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import time
 import datetime
 
-import datetime
+
 
 # Custom Check
 def ensure_voice():

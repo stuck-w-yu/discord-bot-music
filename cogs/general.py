@@ -1,5 +1,9 @@
 import discord
 from discord.ext import commands
+import psutil
+import platform
+import datetime
+import time
 
 class General(commands.Cog):
     def __init__(self, bot):
@@ -52,6 +56,51 @@ class General(commands.Cog):
         embed.set_footer(text="Jangan lupa follow ya! 😉")
         
         await ctx.send(embed=embed)
+
+
+    @commands.command(name='svlogs', aliases=['serverstats', 'sysinfo'])
+    async def svlogs(self, ctx):
+        """Displays server system statistics."""
+        async with ctx.typing():
+            # System Info
+            uname = platform.uname()
+            system_os = f"{uname.system} {uname.release}"
+            node_name = uname.node
+            python_version = platform.python_version()
+            
+            # CPU
+            cpu_usage = psutil.cpu_percent(interval=1)
+            cpu_count = psutil.cpu_count(logical=True)
+            
+            # Memory
+            svmem = psutil.virtual_memory()
+            mem_total = f"{svmem.total / (1024 ** 3):.2f} GB"
+            mem_available = f"{svmem.available / (1024 ** 3):.2f} GB"
+            mem_used = f"{svmem.used / (1024 ** 3):.2f} GB"
+            mem_percent = svmem.percent
+
+            # Disk
+            disk_usage = psutil.disk_usage('/')
+            disk_total = f"{disk_usage.total / (1024 ** 3):.2f} GB"
+            disk_used = f"{disk_usage.used / (1024 ** 3):.2f} GB"
+            disk_percent = disk_usage.percent
+            
+            # Uptime
+            boot_time_timestamp = psutil.boot_time()
+            bt = datetime.datetime.fromtimestamp(boot_time_timestamp)
+            uptime = datetime.datetime.now() - bt
+            
+            embed = discord.Embed(title="🖥️ Server Statistics", color=discord.Color.from_rgb(46, 204, 113))
+            
+            embed.add_field(name="💻 System Info", value=f"**OS**: {system_os}\n**Node**: {node_name}\n**Python**: {python_version}", inline=False)
+            embed.add_field(name="🧠 CPU Usage", value=f"**Usage**: {cpu_usage}%\n**Cores**: {cpu_count}", inline=True)
+            embed.add_field(name="💾 RAM Usage", value=f"**Used**: {mem_used} / {mem_total} ({mem_percent}%)", inline=True)
+            embed.add_field(name="💿 Disk Usage", value=f"**Used**: {disk_used} / {disk_total} ({disk_percent}%)", inline=True)
+            embed.add_field(name="⏱️ Uptime", value=str(uptime).split('.')[0], inline=False)
+            
+            embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+            
+            await ctx.send(embed=embed)
 
     @commands.command(name='help', aliases=['h'])
     async def help(self, ctx):

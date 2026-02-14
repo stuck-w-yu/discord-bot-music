@@ -16,6 +16,7 @@ class MusicBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = True
         # Disable default help command to avoid conflict with custom help
         super().__init__(command_prefix='!', intents=intents, help_command=None)
         # Explicitly remove help command just in case

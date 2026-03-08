@@ -69,7 +69,7 @@ class General(commands.Cog):
 
         async with ctx.typing():
             # Run blocking psutil calls in executor
-            def get_stats():
+            def get_stats(*args):
                 # System Info
                 uname = platform.uname()
                 system_os = f"{uname.system} {uname.release}"

@@ -1,0 +1,8 @@
+{
+  "source_directories": [
+    "/home/stuckwyu/dev/code/bot-discord-music"
+  ],
+  "search_path": [
+    "/home/stuckwyu/dev/code/bot-discord-music/.venv/lib/python3.14/site-packages"
+  ]
+}

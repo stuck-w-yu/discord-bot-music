@@ -1,0 +1,7 @@
+{
+    "venvPath": "/home/stuckwyu/dev/code/bot-discord-music",
+    "venv": ".venv",
+    "extraPaths": [
+        "/home/stuckwyu/dev/code/bot-discord-music/.venv/lib/python3.14/site-packages"
+    ]
+}

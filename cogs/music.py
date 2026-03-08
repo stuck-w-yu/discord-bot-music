@@ -33,6 +33,8 @@ class Music(commands.Cog):
         self.last_np_msg = {} # {guild_id: message}
         self.start_times = {} # {guild_id: time.time()}
         self.pause_starts = {} # {guild_id: time.time()}
+        self.skip_votes = {} # {guild_id: set(user_id)}
+        self.stop_votes = {} # {guild_id: set(user_id)}
         self.yt_dlp_options = {
             'format': 'bestaudio/best',
             'extractaudio': True,
@@ -134,6 +136,8 @@ class Music(commands.Cog):
             self.start_times[guild_id] = time.time()
             if guild_id in self.pause_starts:
                 del self.pause_starts[guild_id]
+            self.skip_votes[guild_id] = set()
+            self.stop_votes[guild_id] = set()
             
             source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
             source = discord.PCMVolumeTransformer(source)
@@ -171,6 +175,7 @@ class Music(commands.Cog):
             await self.play_next(ctx)
 
     @commands.command(name='join', aliases=['j'])
+    @ensure_voice()
     async def play_join(self, ctx):
         if ctx.author.voice:
             channel = ctx.author.voice.channel
@@ -183,6 +188,7 @@ class Music(commands.Cog):
             await ctx.send('You are not in a voice channel!')
 
     @commands.command(name='leave', aliases=['l', 'dc'])
+    @ensure_voice()
     async def play_leave(self, ctx):
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
@@ -199,10 +205,24 @@ class Music(commands.Cog):
             await ctx.send('I am not in a voice channel!')
 
     @commands.command(name='loop', aliases=['lp'])
-    async def loop(self, ctx):
-        """Cycles loop mode: Off -> Current -> All -> Off"""
+    @ensure_voice()
+    async def loop(self, ctx, mode: str = None):
+        """Cycles loop mode: Off -> Current -> All -> Off, or specify mode (!loop all, !loop current)"""
         current_state = self.loops.get(ctx.guild.id, 0)
-        new_state = (current_state + 1) % 3
+        
+        if mode:
+            mode = mode.lower()
+            if mode == 'all':
+                new_state = 2
+            elif mode in ['current', 'song', 'one']:
+                new_state = 1
+            elif mode in ['off', 'none', 'disable']:
+                new_state = 0
+            else:
+                return await ctx.send("Invalid loop mode. Use `all`, `current`, or `off`.")
+        else:
+            new_state = (current_state + 1) % 3
+            
         self.loops[ctx.guild.id] = new_state
         
         msg = "Loop disabled ➡️"
@@ -395,19 +415,47 @@ class Music(commands.Cog):
     @commands.command(name='stop', aliases=['st'])
     @ensure_voice()
     async def stop(self, ctx):
-        if ctx.voice_client:
-            ctx.voice_client.stop()
-            self.queues[ctx.guild.id] = []
-            self.current_song[ctx.guild.id] = None
-            self.loops[ctx.guild.id] = 0
+        if not ctx.voice_client:
+            return await ctx.send("Not connected to a voice channel.")
             
-            # Clean up the last "Now playing" message reference, but maybe not delete it on stop?
-            # Or should we? The user asked for "when next song plays".
-            # I'll just clear the reference so we don't try to delete an old one next time we restart.
-            if ctx.guild.id in self.last_np_msg:
-                del self.last_np_msg[ctx.guild.id]
+        guild_id = ctx.guild.id
+        current = self.current_song.get(guild_id)
+        
+        # Check permissions
+        can_stop = False
+        if current and current.get('requester_id') == ctx.author.id:
+            can_stop = True
+        elif ctx.author.guild_permissions.administrator:
+            can_stop = True
+            
+        if not can_stop:
+            # Handle voting
+            if guild_id not in self.stop_votes:
+                self.stop_votes[guild_id] = set()
+                
+            if ctx.author.id in self.stop_votes[guild_id]:
+                return await ctx.send("You have already voted to stop.")
+                
+            self.stop_votes[guild_id].add(ctx.author.id)
+            votes_needed = 3
+            current_votes = len(self.stop_votes[guild_id])
+            
+            # Auto-skip if 3 votes or if the voice channel has less than 3 other listening members
+            # (Total members in vc - 1 (bot) - 1 (requester) ) -> just simplify to 3 votes for now as requested
+            if current_votes < votes_needed:
+                return await ctx.send(f"🗳️ Vote to **stop** registered. [{current_votes}/{votes_needed}]")
 
-            await ctx.send("Stopped and cleared queue.")
+        ctx.voice_client.stop()
+        self.queues[ctx.guild.id] = []
+        self.current_song[ctx.guild.id] = None
+        self.loops[ctx.guild.id] = 0
+        self.skip_votes[ctx.guild.id] = set()
+        self.stop_votes[ctx.guild.id] = set()
+        
+        if ctx.guild.id in self.last_np_msg:
+            del self.last_np_msg[ctx.guild.id]
+
+        await ctx.send("⏹️ Stopped and cleared queue.")
 
     @commands.command(name='queue', aliases=['q'])
     @ensure_voice()
@@ -429,6 +477,31 @@ class Music(commands.Cog):
     async def skip(self, ctx, index: int = None):
         if not ctx.voice_client or not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
             return await ctx.send("Nothing is playing.")
+            
+        guild_id = ctx.guild.id
+        current = self.current_song.get(guild_id)
+        
+        # Check permissions
+        can_skip = False
+        if current and current.get('requester_id') == ctx.author.id:
+            can_skip = True
+        elif ctx.author.guild_permissions.administrator:
+            can_skip = True
+            
+        if not can_skip:
+            # Handle voting
+            if guild_id not in self.skip_votes:
+                self.skip_votes[guild_id] = set()
+                
+            if ctx.author.id in self.skip_votes[guild_id]:
+                return await ctx.send("You have already voted to skip.")
+                
+            self.skip_votes[guild_id].add(ctx.author.id)
+            votes_needed = 3
+            current_votes = len(self.skip_votes[guild_id])
+            
+            if current_votes < votes_needed:
+                return await ctx.send(f"🗳️ Vote to **skip** registered. [{current_votes}/{votes_needed}]")
 
         if index is not None:
             if ctx.guild.id not in self.queues or not self.queues[ctx.guild.id]:
@@ -437,24 +510,17 @@ class Music(commands.Cog):
             if index < 1 or index > len(self.queues[ctx.guild.id]):
                  return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(self.queues[ctx.guild.id])}.")
             
-            # Skip to specific index (Move to Top):
-            # We want to play the song at index (1-based) next.
-            # So we move it to index 0, pushing everything else down.
-            # e.g. Queue: [A, B, C, D]. !skip 3 (Target C).
-            # Pop C. Queue: [A, B, D].
-            # Insert C at 0. Queue: [C, A, B, D].
-            # Then stop() triggers play_next(), which plays C.
-            
             target_song = self.queues[ctx.guild.id].pop(index-1)
             self.queues[ctx.guild.id].insert(0, target_song)
             
-            await ctx.send(f"⏭️ Jumping to **{target_song['title']}** (moved to top of queue).")
+            await ctx.send(f"⏭️ Skipping to **{target_song['title']}**...")
             ctx.voice_client.stop()
         else:
             ctx.voice_client.stop()
             await ctx.send("⏭️ Skipped song.")
 
     @commands.command(name='volume', aliases=['v', 'vol'])
+    @ensure_voice()
     async def volume(self, ctx, volume: int):
         """Sets the volume of the player (0-100)"""
         if ctx.voice_client is None:
@@ -529,6 +595,16 @@ class MusicPlayerView(discord.ui.View):
         self.cog = cog
         self.ctx = ctx
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.voice:
+             await interaction.response.send_message("You need to be in a voice channel to use this button.", ephemeral=True)
+             return False
+        vc = interaction.guild.voice_client
+        if vc and vc.channel != interaction.user.voice.channel:
+             await interaction.response.send_message("You need to be in the same voice channel as the bot to use this button.", ephemeral=True)
+             return False
+        return True
+
     @discord.ui.button(label="⏯️ Pause/Resume", style=discord.ButtonStyle.primary, custom_id="music_pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = self.ctx.guild.voice_client
@@ -546,11 +622,34 @@ class MusicPlayerView(discord.ui.View):
     @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id="music_skip")
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = self.ctx.guild.voice_client
-        if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()
-            await interaction.response.send_message("⏭️ Skipped", ephemeral=True)
-        else:
-            await interaction.response.send_message("Nothing to skip", ephemeral=True)
+        if not vc or not (vc.is_playing() or vc.is_paused()):
+            return await interaction.response.send_message("Nothing to skip", ephemeral=True)
+            
+        guild_id = self.ctx.guild.id
+        current = self.cog.current_song.get(guild_id)
+        
+        can_skip = False
+        if current and current.get('requester_id') == interaction.user.id:
+            can_skip = True
+        elif interaction.user.guild_permissions.administrator:
+            can_skip = True
+            
+        if not can_skip:
+            if guild_id not in self.cog.skip_votes:
+                self.cog.skip_votes[guild_id] = set()
+                
+            if interaction.user.id in self.cog.skip_votes[guild_id]:
+                return await interaction.response.send_message("You have already voted to skip.", ephemeral=True)
+                
+            self.cog.skip_votes[guild_id].add(interaction.user.id)
+            votes_needed = 3
+            current_votes = len(self.cog.skip_votes[guild_id])
+            
+            if current_votes < votes_needed:
+                return await interaction.response.send_message(f"🗳️ Vote to **skip** registered. [{current_votes}/{votes_needed}]")
+
+        vc.stop()
+        await interaction.response.send_message("⏭️ Skipped")
 
     @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.success, custom_id="music_loop")
     async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -571,14 +670,39 @@ class MusicPlayerView(discord.ui.View):
     @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="music_stop")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = self.ctx.guild.voice_client
-        if vc:
-            vc.stop()
-            self.cog.queues[self.ctx.guild.id] = []
-            self.cog.current_song[self.ctx.guild.id] = None
-            self.cog.loops[self.ctx.guild.id] = 0
-            await interaction.response.send_message("⏹️ Stopped and queue cleared", ephemeral=True)
-        else:
-            await interaction.response.send_message("Not connected", ephemeral=True)
+        if not vc:
+            return await interaction.response.send_message("Not connected", ephemeral=True)
+
+        guild_id = self.ctx.guild.id
+        current = self.cog.current_song.get(guild_id)
+        
+        can_stop = False
+        if current and current.get('requester_id') == interaction.user.id:
+            can_stop = True
+        elif interaction.user.guild_permissions.administrator:
+            can_stop = True
+            
+        if not can_stop:
+            if guild_id not in self.cog.stop_votes:
+                self.cog.stop_votes[guild_id] = set()
+                
+            if interaction.user.id in self.cog.stop_votes[guild_id]:
+                return await interaction.response.send_message("You have already voted to stop.", ephemeral=True)
+                
+            self.cog.stop_votes[guild_id].add(interaction.user.id)
+            votes_needed = 3
+            current_votes = len(self.cog.stop_votes[guild_id])
+            
+            if current_votes < votes_needed:
+                return await interaction.response.send_message(f"🗳️ Vote to **stop** registered. [{current_votes}/{votes_needed}]")
+
+        vc.stop()
+        self.cog.queues[guild_id] = []
+        self.cog.current_song[guild_id] = None
+        self.cog.loops[guild_id] = 0
+        self.cog.skip_votes[guild_id] = set()
+        self.cog.stop_votes[guild_id] = set()
+        await interaction.response.send_message("⏹️ Stopped and queue cleared")
 
     @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="music_queue")
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -603,6 +727,16 @@ class QueuePaginationView(discord.ui.View):
         self.current_page = 0
         self.items_per_page = 10
         self.total_pages = (len(queue_list) - 1) // self.items_per_page + 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.voice:
+             await interaction.response.send_message("You need to be in a voice channel to use this button.", ephemeral=True)
+             return False
+        vc = interaction.guild.voice_client
+        if vc and vc.channel != interaction.user.voice.channel:
+             await interaction.response.send_message("You need to be in the same voice channel as the bot.", ephemeral=True)
+             return False
+        return True
 
     def update_buttons(self):
         self.children[0].disabled = self.current_page == 0

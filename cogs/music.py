@@ -52,16 +52,25 @@ class Music(commands.Cog):
             'source_address': '0.0.0.0',
         }
         
-        # Check for cookies from Env Var (Coolify/Docker support)
+        # Check for cookies in DATA_DIR (for persistent storage on Dokploy / Coolify)
+        data_dir = os.getenv('DATA_DIR', 'data')
+        data_cookie_path = os.path.join(data_dir, 'cookies.txt')
+        
+        # Check for cookies from Env Var
         if os.getenv('YOUTUBE_COOKIES'):
-            with open('cookies.txt', 'w') as f:
+            # Ensure the data directory exists
+            os.makedirs(data_dir, exist_ok=True)
+            with open(data_cookie_path, 'w') as f:
                 f.write(os.getenv('YOUTUBE_COOKIES'))
-            print("🍪 Created cookies.txt from Environment Variable")
+            print(f"🍪 Created {data_cookie_path} from Environment Variable")
 
-        # Check for cookies.txt
-        if os.path.exists('cookies.txt'):
+        # Determine which cookies.txt to use
+        if os.path.exists(data_cookie_path):
+            self.yt_dlp_options['cookiefile'] = data_cookie_path
+            print(f"🍪 Loaded {data_cookie_path} for authentication")
+        elif os.path.exists('cookies.txt'):
             self.yt_dlp_options['cookiefile'] = 'cookies.txt'
-            print("🍪 Loaded cookies.txt for authentication")
+            print("🍪 Loaded local cookies.txt for authentication")
         else:
             print("⚠️ cookies.txt not found. YouTube may restrict playback.")
 

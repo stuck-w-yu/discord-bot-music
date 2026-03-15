@@ -12,7 +12,46 @@ import datetime
 import json
 import urllib.parse
 import urllib.request
-from typing import Optional, Dict, List, Any, Set, cast
+from typing import Optional, Dict, List, Any, Set, cast, Union
+
+def _votes_needed(vc: discord.VoiceProtocol) -> int:
+    """Dynamic vote threshold based on non-bot members in the voice channel."""
+    channel = getattr(vc, 'channel', None)
+    if channel is None or not hasattr(channel, 'members'):
+        return 1
+    non_bot_members = [m for m in channel.members if not m.bot]
+    member_count = len(non_bot_members)
+    if member_count <= 1:
+        return 1
+    if member_count <= 4:
+        return 2
+    return 3
+
+
+def _make_vote_embed(
+    action: str,
+    current_votes: int,
+    votes_needed: int,
+    voter: Union[discord.Member, discord.User],
+) -> discord.Embed:
+    """Return an embed showing vote progress for pause/skip/stop actions."""
+    action_emoji = {"pause": "⏸️", "skip": "⏭️", "stop": "⏹️"}.get(action, "🗳️")
+    bar = "█" * current_votes + "░" * (votes_needed - current_votes)
+    remaining = votes_needed - current_votes
+    embed = discord.Embed(
+        title=f"🗳️ Vote to {action.capitalize()}",
+        description=f"{action_emoji} **{action.capitalize()}** vote registered!",
+        color=discord.Color.orange(),
+    )
+    embed.add_field(
+        name="Progress",
+        value=f"`{bar}` **{current_votes}/{votes_needed}**",
+        inline=False,
+    )
+    embed.add_field(name="Voted by", value=voter.mention, inline=True)
+    embed.set_footer(text=f"Need {remaining} more vote(s) to {action}")
+    return embed
+
 
 # Custom Check
 def ensure_voice():
@@ -565,10 +604,10 @@ class Music(commands.Cog):
                 return await ctx.send("You have already voted to stop.")
                 
             self.stop_votes[guild_id].add(ctx.author.id)
-            votes_needed = 3
+            votes_needed = _votes_needed(ctx.voice_client) if ctx.voice_client else 3
             current_votes = len(self.stop_votes[guild_id])
             if current_votes < votes_needed:
-                return await ctx.send(f"🗳️ Vote to **stop** registered. [{current_votes}/{votes_needed}]")
+                return await ctx.send(embed=_make_vote_embed("stop", current_votes, votes_needed, ctx.author))
                 
         ctx.voice_client.stop()
         self.queues[ctx.guild.id] = []
@@ -616,10 +655,10 @@ class Music(commands.Cog):
             if ctx.author.id in self.skip_votes[guild_id]:
                 return await ctx.send("You have already voted to skip.")
             self.skip_votes[guild_id].add(ctx.author.id)
-            votes_needed = 3
+            votes_needed = _votes_needed(ctx.voice_client) if ctx.voice_client else 3
             current_votes = len(self.skip_votes[guild_id])
             if current_votes < votes_needed:
-                return await ctx.send(f"🗳️ Vote to **skip** registered. [{current_votes}/{votes_needed}]")
+                return await ctx.send(embed=_make_vote_embed("skip", current_votes, votes_needed, ctx.author))
                 
         if index is not None:
             if ctx.guild.id not in self.queues or not self.queues[ctx.guild.id]:
@@ -734,7 +773,7 @@ class MusicPlayerView(discord.ui.View):
             current_votes = len(self.cog.pause_votes[guild_id])
             if current_votes < votes_needed:
                 return await interaction.response.send_message(
-                    f"🗳️ Vote to **pause** registered. [{current_votes}/{votes_needed}]"
+                    embed=_make_vote_embed("pause", current_votes, votes_needed, interaction.user)
                 )
 
             vc.pause()
@@ -761,7 +800,9 @@ class MusicPlayerView(discord.ui.View):
             votes_needed = self._votes_needed(vc)
             current_votes = len(self.cog.skip_votes[guild_id])
             if current_votes < votes_needed:
-                return await interaction.response.send_message(f"🗳️ Vote to **skip** registered. [{current_votes}/{votes_needed}]")
+                return await interaction.response.send_message(
+                    embed=_make_vote_embed("skip", current_votes, votes_needed, interaction.user)
+                )
         vc.stop()
         await interaction.response.send_message("⏭️ Skipped")
 
@@ -795,7 +836,9 @@ class MusicPlayerView(discord.ui.View):
             votes_needed = self._votes_needed(vc)
             current_votes = len(self.cog.stop_votes[guild_id])
             if current_votes < votes_needed:
-                return await interaction.response.send_message(f"🗳️ Vote to **stop** registered. [{current_votes}/{votes_needed}]")
+                return await interaction.response.send_message(
+                    embed=_make_vote_embed("stop", current_votes, votes_needed, interaction.user)
+                )
         vc.stop()
         self.cog.queues[guild_id] = []
         self.cog.save_queues()
@@ -807,19 +850,7 @@ class MusicPlayerView(discord.ui.View):
         await interaction.response.send_message("⏹️ Stopped and queue cleared")
 
     def _votes_needed(self, vc: discord.VoiceProtocol) -> int:
-        # Dynamic threshold so vote still works in small channels.
-        channel = getattr(vc, 'channel', None)
-        if channel is None or not hasattr(channel, 'members'):
-            return 1
-
-        non_bot_members = [m for m in channel.members if not m.bot]
-        member_count = len(non_bot_members)
-
-        if member_count <= 1:
-            return 1
-        if member_count <= 4:
-            return 2
-        return 3
+        return _votes_needed(vc)
 
     @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="music_queue")
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:

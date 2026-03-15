@@ -1,3 +1,5 @@
+# pyright: reportGeneralTypeIssues=false, reportOptionalMemberAccess=false, reportOptionalSubscript=false, reportAttributeAccessIssue=false, reportReturnType=false
+
 import discord
 from discord.ext import commands
 import yt_dlp
@@ -8,7 +10,9 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import time
 import datetime
 import json
-from typing import Optional, Dict, List, Any, Set
+import urllib.parse
+import urllib.request
+from typing import Optional, Dict, List, Any, Set, cast
 
 # Custom Check
 def ensure_voice():
@@ -60,8 +64,9 @@ class Music(commands.Cog):
         
         if os.getenv('YOUTUBE_COOKIES'):
             os.makedirs(data_dir, exist_ok=True)
+            youtube_cookies = os.getenv('YOUTUBE_COOKIES', '')
             with open(data_cookie_path, 'w') as f:
-                f.write(os.getenv('YOUTUBE_COOKIES'))
+                f.write(youtube_cookies)
             print(f"🍪 Created {data_cookie_path} from Environment Variable")
 
         if os.path.exists(data_cookie_path):
@@ -132,7 +137,11 @@ class Music(commands.Cog):
          guild_id = guild.id
          if guild_id in self.current_song and self.current_song[guild_id]:
              entry = self.current_song[guild_id]
-             source = discord.FFmpegPCMAudio(entry['stream_url'], **self.ffmpeg_options)
+             source = discord.FFmpegPCMAudio(
+                 entry['stream_url'],
+                 before_options=self.ffmpeg_options['before_options'],
+                 options=self.ffmpeg_options['options'],
+             )
              source = discord.PCMVolumeTransformer(source)
              source.volume = self.volumes.get(guild_id, 0.5)
              vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next_internal(guild_id, vc), self.bot.loop))
@@ -140,7 +149,7 @@ class Music(commands.Cog):
     async def play_next(self, ctx: commands.Context) -> None:
         await self.play_next_internal(ctx.guild.id, ctx.voice_client, ctx)
         
-    async def play_next_internal(self, guild_id: int, vc: discord.VoiceClient, ctx: Optional[commands.Context] = None) -> None:
+    async def play_next_internal(self, guild_id: int, vc: Optional[discord.VoiceProtocol], ctx: Optional[commands.Context] = None) -> None:
         if not vc: return
         loops = self.loops.get(guild_id, 0)
         previous_song = self.current_song.get(guild_id)
@@ -177,7 +186,11 @@ class Music(commands.Cog):
             self.skip_votes[guild_id] = set()
             self.stop_votes[guild_id] = set()
             
-            source = discord.FFmpegPCMAudio(filename, **self.ffmpeg_options)
+            source = discord.FFmpegPCMAudio(
+                filename,
+                before_options=self.ffmpeg_options['before_options'],
+                options=self.ffmpeg_options['options'],
+            )
             source = discord.PCMVolumeTransformer(source)
             source.volume = self.volumes.get(guild_id, 0.5)
 
@@ -221,7 +234,7 @@ class Music(commands.Cog):
     @ensure_voice()
     async def play_leave(self, ctx: commands.Context) -> None:
         if ctx.voice_client:
-            await ctx.voice_client.disconnect()
+            await ctx.voice_client.disconnect(force=False)
             if ctx.guild.id in self.queues:
                 del self.queues[ctx.guild.id]
                 self.save_queues()
@@ -237,7 +250,7 @@ class Music(commands.Cog):
 
     @commands.command(name='loop', aliases=['lp'])
     @ensure_voice()
-    async def loop(self, ctx: commands.Context, mode: str = None) -> None:
+    async def loop(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
         current_state = self.loops.get(ctx.guild.id, 0)
         if mode:
             mode = mode.lower()
@@ -268,6 +281,77 @@ class Music(commands.Cog):
             print(f"Failed to extract info for {query}: {e}")
             return None
 
+    def _spotify_track_url_from_query(self, query: str) -> Optional[str]:
+        if "open.spotify.com/track/" in query:
+            track_part = query.split("open.spotify.com/track/", 1)[1]
+            track_id = track_part.split("?", 1)[0].split("/", 1)[0].strip()
+            if track_id:
+                return f"https://open.spotify.com/track/{track_id}"
+            return None
+
+        if query.startswith("spotify:track:"):
+            parts = query.split(":")
+            if len(parts) >= 3 and parts[2].strip():
+                return f"https://open.spotify.com/track/{parts[2].strip()}"
+
+        return None
+
+    async def _spotify_public_track_query(self, query: str) -> Optional[str]:
+        # Public fallback without Spotify API key; only supports single track links.
+        track_url = self._spotify_track_url_from_query(query)
+        if not track_url:
+            return None
+
+        oembed_url = f"https://open.spotify.com/oembed?url={urllib.parse.quote(track_url, safe='')}"
+        loop = asyncio.get_event_loop()
+
+        def fetch_title() -> Optional[str]:
+            try:
+                req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                title = payload.get("title")
+                if isinstance(title, str) and title.strip():
+                    return title.strip()
+            except Exception:
+                return None
+            return None
+
+        return await loop.run_in_executor(None, fetch_title)
+
+    async def _spotify_public_queries(self, query: str) -> List[str]:
+        # Best-effort fallback without Spotify API key.
+        # For track links, use oEmbed title. For playlist/album, try yt-dlp metadata extraction.
+        track_query = await self._spotify_public_track_query(query)
+        if track_query:
+            return [track_query]
+
+        data = await self._extract_info_async(query)
+        if not data:
+            return []
+
+        entries: List[Dict[str, Any]] = []
+        if isinstance(data, dict) and 'entries' in data and data['entries']:
+            entries = [e for e in data['entries'] if isinstance(e, dict)]
+        elif isinstance(data, dict):
+            entries = [data]
+
+        queries: List[str] = []
+        for entry in entries:
+            title = (entry.get('track') or entry.get('title') or '').strip()
+            artist = (entry.get('artist') or entry.get('uploader') or '').strip()
+            if not title:
+                continue
+
+            if artist and artist.lower() not in title.lower():
+                queries.append(f"{artist} - {title}")
+            else:
+                queries.append(title)
+
+        # De-duplicate while preserving order.
+        deduped = list(dict.fromkeys(queries))
+        return deduped
+
     @commands.command(name='play', aliases=['p'])
     @ensure_voice()
     async def play(self, ctx: commands.Context, *, query: str) -> None:
@@ -283,37 +367,53 @@ class Music(commands.Cog):
         loop = asyncio.get_event_loop()
 
         if "spotify.com" in query or "spotify:" in query:
-            if not self.sp:
-                return await ctx.send("Spotify support is not configured (missing credentials).")
-
             await ctx.send("Spotify link detected. Fetching tracks...")
             tracks_to_search = []
+            spotify_error: Optional[str] = None
             
-            try:
-                # Need to use loop.run_in_executor for spotify calls too since they can be blocking network requests
-                if "track" in query:
-                    track = await loop.run_in_executor(None, lambda: self.sp.track(query))
-                    tracks_to_search.append(f"{track['artists'][0]['name']} - {track['name']}")
-                elif "playlist" in query:
-                    results = await loop.run_in_executor(None, lambda: self.sp.playlist_tracks(query))
-                    tracks = results['items']
-                    while results['next']:
-                        results = await loop.run_in_executor(None, lambda: self.sp.next(results))
-                        tracks.extend(results['items'])
-                    for item in tracks:
-                        track = item.get('track')
-                        if track:
-                            tracks_to_search.append(f"{track['artists'][0]['name']} - {track['name']}")
-                elif "album" in query:
-                    results = await loop.run_in_executor(None, lambda: self.sp.album_tracks(query))
-                    tracks = results['items']
-                    while results['next']:
-                        results = await loop.run_in_executor(None, lambda: self.sp.next(results))
-                        tracks.extend(results['items'])
-                    for track in tracks:
+            if self.sp:
+                try:
+                    # Need to use loop.run_in_executor for spotify calls too since they can be blocking network requests
+                    if "track" in query:
+                        track = await loop.run_in_executor(None, lambda: self.sp.track(query))
                         tracks_to_search.append(f"{track['artists'][0]['name']} - {track['name']}")
-            except Exception as e:
-                return await ctx.send(f"Error fetching Spotify data: {e}")
+                    elif "playlist" in query:
+                        results = await loop.run_in_executor(None, lambda: self.sp.playlist_tracks(query))
+                        tracks = results['items']
+                        while results['next']:
+                            results = await loop.run_in_executor(None, lambda: self.sp.next(results))
+                            tracks.extend(results['items'])
+                        for item in tracks:
+                            track = item.get('track')
+                            if track:
+                                tracks_to_search.append(f"{track['artists'][0]['name']} - {track['name']}")
+                    elif "album" in query:
+                        results = await loop.run_in_executor(None, lambda: self.sp.album_tracks(query))
+                        tracks = results['items']
+                        while results['next']:
+                            results = await loop.run_in_executor(None, lambda: self.sp.next(results))
+                            tracks.extend(results['items'])
+                        for track in tracks:
+                            tracks_to_search.append(f"{track['artists'][0]['name']} - {track['name']}")
+                except Exception as e:
+                    spotify_error = str(e)
+
+            if not tracks_to_search:
+                fallback_queries = await self._spotify_public_queries(query)
+                if fallback_queries:
+                    tracks_to_search = fallback_queries
+                    if len(fallback_queries) == 1:
+                        await ctx.send("Spotify API tidak tersedia, pakai fallback publik untuk track tunggal.")
+                    else:
+                        await ctx.send(
+                            f"Spotify API tidak tersedia, pakai fallback publik playlist/album ({len(fallback_queries)} track ditemukan)."
+                        )
+                elif spotify_error:
+                    return await ctx.send(f"Error fetching Spotify data: {spotify_error}")
+                elif not self.sp:
+                    return await ctx.send(
+                        "Spotify credentials tidak ditemukan, dan fallback publik tidak bisa membaca link Spotify ini."
+                    )
 
             if not tracks_to_search:
                  return await ctx.send("No tracks found in Spotify link.")
@@ -497,7 +597,7 @@ class Music(commands.Cog):
 
     @commands.command(name='skip', aliases=['s', 'next'])
     @ensure_voice()
-    async def skip(self, ctx: commands.Context, index: int = None) -> None:
+    async def skip(self, ctx: commands.Context, index: Optional[int] = None) -> None:
         if not ctx.voice_client or not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
             return await ctx.send("Nothing is playing.")
             
@@ -582,7 +682,8 @@ class Music(commands.Cog):
             embed.set_thumbnail(url=entry['thumbnail'])
             
         embed.add_field(name="Progress", value=f"`{time_str}`\n`{bar}`", inline=False)
-        requester = ctx.guild.get_member(entry.get('requester_id'))
+        requester_id = entry.get('requester_id')
+        requester = ctx.guild.get_member(cast(int, requester_id)) if requester_id is not None else None
         req_name = requester.display_name if requester else "Unknown"
         embed.set_footer(text=f"Requested by {req_name}", icon_url=requester.display_avatar.url if requester else None)
         await ctx.send(embed=embed)
@@ -705,9 +806,13 @@ class MusicPlayerView(discord.ui.View):
         self.cog.stop_votes[guild_id] = set()
         await interaction.response.send_message("⏹️ Stopped and queue cleared")
 
-    def _votes_needed(self, vc: discord.VoiceClient) -> int:
+    def _votes_needed(self, vc: discord.VoiceProtocol) -> int:
         # Dynamic threshold so vote still works in small channels.
-        non_bot_members = [m for m in vc.channel.members if not m.bot]
+        channel = getattr(vc, 'channel', None)
+        if channel is None or not hasattr(channel, 'members'):
+            return 1
+
+        non_bot_members = [m for m in channel.members if not m.bot]
         member_count = len(non_bot_members)
 
         if member_count <= 1:

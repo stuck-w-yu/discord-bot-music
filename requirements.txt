@@ -1,6 +1,7 @@
 discord.py
 yt-dlp
 PyNaCl
+davey
 python-dotenv
 ffmpeg-python
 

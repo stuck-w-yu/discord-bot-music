@@ -20,11 +20,26 @@ If you are deploying on Coolify or Docker, you can use an Environment Variable i
 4.  Redeploy/Restart the bot.
 
 ## 🛠️ Usage
-- 🎵 High-quality music playback from YouTube & Spotify
+- 🎵 High-quality music playback from YouTube & Spotify (metadata search)
 - 📈 Leveling system with text & voice XP
 - ⏯️ Music controls (Play, Pause, Skip, Stop, Queue)
 - 📝 User profiles and leaderboards
 - 🐳 Docker support for easy deployment
+
+## Lavalink Mode (Recommended for Stability)
+Bot ini sekarang mendukung 2 mode music player:
+1. Legacy mode (`cogs/music.py`) - FFmpeg + yt-dlp langsung.
+2. Lavalink mode (`cogs/music_lavalink.py`) - playback diproses oleh Lavalink server.
+
+Aktifkan Lavalink mode dengan env:
+- `USE_LAVALINK=true`
+- `LAVALINK_HOST=lavalink`
+- `LAVALINK_PORT=2333`
+- `LAVALINK_PASSWORD=youshallnotpass`
+
+Catatan Spotify:
+- Spotify tidak di-stream langsung (DRM).
+- Bot membaca metadata lagu Spotify (judul + artis), lalu mencari sumber playable (YouTube) untuk diputar via Lavalink.
 
 ## Setup
 1. Clone the repository
@@ -48,6 +63,8 @@ To ensure data persistence (levels, XP) across restarts, use Docker Compose:
    docker-compose build --no-cache
    docker-compose up -d
    ```
+
+Compose di repository ini sudah menyertakan service `lavalink`, jadi cukup `docker-compose up -d` untuk menjalankan bot + lavalink sekaligus.
 
 ## Deploying on Coolify (Dockerfile Only)
 If you prefer using just the `Dockerfile`:

@@ -1,0 +1,35 @@
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# VCS and editor
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Local/runtime data not needed in image
+data/
+logs/
+*.log
+
+# Local secrets and env files
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db

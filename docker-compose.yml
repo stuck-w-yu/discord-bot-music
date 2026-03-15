@@ -1,12 +1,28 @@
 version: '3.8'
 
 services:
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    restart: always
+    environment:
+      - _JAVA_OPTIONS=-Xmx512m
+      - SERVER_PORT=2333
+      - LAVALINK_SERVER_PASSWORD=youshallnotpass
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml
+
   bot:
     build: .
     restart: always
+    depends_on:
+      - lavalink
     volumes:
       - ./data:/app/data
     env_file:
       - .env
     environment:
       - DATA_DIR=/app/data
+      - USE_LAVALINK=true
+      - LAVALINK_HOST=lavalink
+      - LAVALINK_PORT=2333
+      - LAVALINK_PASSWORD=youshallnotpass

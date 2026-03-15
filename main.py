@@ -23,7 +23,13 @@ class MusicBot(commands.Bot):
         self.remove_command('help')
 
     async def setup_hook(self):
-        await self.load_extension('cogs.music')
+        use_lavalink = os.getenv('USE_LAVALINK', 'false').lower() == 'true'
+        if use_lavalink:
+            await self.load_extension('cogs.music_lavalink')
+            print('Loaded Lavalink music cog (cogs.music_lavalink).')
+        else:
+            await self.load_extension('cogs.music')
+            print('Loaded legacy music cog (cogs.music).')
         await self.load_extension('cogs.leveling')
         await self.load_extension('cogs.general')
         print("Music and Leveling Cogs Loaded")

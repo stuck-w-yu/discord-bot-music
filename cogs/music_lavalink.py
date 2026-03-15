@@ -1,0 +1,474 @@
+import asyncio
+import datetime
+import os
+from typing import Dict, List, Optional, Set
+
+import discord
+from discord.ext import commands
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import wavelink
+
+
+def ensure_voice():
+    async def predicate(ctx: commands.Context) -> bool:
+        if not ctx.author.voice:
+            raise commands.CommandError("You need to be in a voice channel to use this command.")
+
+        if ctx.voice_client and ctx.voice_client.channel != ctx.author.voice.channel:
+            raise commands.CommandError("You need to be in the same voice channel as the bot to use this command.")
+
+        return True
+
+    return commands.check(predicate)
+
+
+class MusicLavalink(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.loops: Dict[int, int] = {}  # 0: off, 1: current, 2: all
+        self.current_song: Dict[int, Optional[wavelink.Playable]] = {}
+        self.skip_votes: Dict[int, Set[int]] = {}
+        self.stop_votes: Dict[int, Set[int]] = {}
+        self.volumes: Dict[int, int] = {}
+        self.node_connected = False
+
+        client_id = os.getenv("SPOTIPY_CLIENT_ID")
+        client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
+        if client_id and client_secret:
+            self.sp = spotipy.Spotify(
+                auth_manager=SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
+            )
+        else:
+            self.sp = None
+            print("Spotify credentials not found. Spotify support disabled.")
+
+    async def cog_load(self) -> None:
+        self.bot.loop.create_task(self._connect_lavalink())
+
+    async def _connect_lavalink(self) -> None:
+        await self.bot.wait_until_ready()
+
+        if wavelink.Pool.nodes:
+            self.node_connected = True
+            return
+
+        host = os.getenv("LAVALINK_HOST", "lavalink")
+        port = int(os.getenv("LAVALINK_PORT", "2333"))
+        password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+        secure = os.getenv("LAVALINK_SECURE", "false").lower() == "true"
+
+        node = wavelink.Node(uri=f"{'https' if secure else 'http'}://{host}:{port}", password=password)
+
+        for attempt in range(1, 11):
+            try:
+                await wavelink.Pool.connect(nodes=[node], client=self.bot)
+                self.node_connected = True
+                print(f"Connected to Lavalink node on attempt {attempt}.")
+                return
+            except Exception as e:
+                print(f"Lavalink connect failed (attempt {attempt}/10): {e}")
+                await asyncio.sleep(3)
+
+        print("Failed to connect to Lavalink. Music commands will be unavailable until node is reachable.")
+
+    async def _ensure_player(self, ctx: commands.Context) -> wavelink.Player:
+        if not self.node_connected and not wavelink.Pool.nodes:
+            raise commands.CommandError("Lavalink is not connected yet. Please try again in a few seconds.")
+
+        player = ctx.voice_client
+        if isinstance(player, wavelink.Player):
+            return player
+
+        channel = ctx.author.voice.channel
+        player = await channel.connect(cls=wavelink.Player, self_deaf=True)
+        self.volumes.setdefault(ctx.guild.id, 50)
+        await player.set_volume(self.volumes[ctx.guild.id])
+        return player
+
+    def _is_url(self, query: str) -> bool:
+        return query.startswith("http://") or query.startswith("https://")
+
+    def _requester_from_track(self, track: Optional[wavelink.Playable]) -> Optional[int]:
+        if not track:
+            return None
+
+        extras = getattr(track, "extras", None)
+        if isinstance(extras, dict):
+            return extras.get("requester_id")
+        if extras is not None:
+            return getattr(extras, "requester_id", None)
+        return None
+
+    async def _search_single_track(self, query: str) -> Optional[wavelink.Playable]:
+        searches = [query] if self._is_url(query) else [f"ytsearch:{query}", query]
+
+        for term in searches:
+            result = await wavelink.Playable.search(term)
+            if not result:
+                continue
+
+            if isinstance(result, wavelink.Playlist):
+                return result.tracks[0] if result.tracks else None
+
+            return result[0]
+
+        return None
+
+    async def _spotify_to_queries(self, query: str) -> List[str]:
+        if not self.sp:
+            raise commands.CommandError("Spotify support is not configured (missing credentials).")
+
+        loop = asyncio.get_event_loop()
+        queries: List[str] = []
+
+        if "track" in query:
+            track = await loop.run_in_executor(None, lambda: self.sp.track(query))
+            queries.append(f"{track['artists'][0]['name']} - {track['name']}")
+        elif "playlist" in query:
+            results = await loop.run_in_executor(None, lambda: self.sp.playlist_tracks(query))
+            items = list(results["items"])
+            while results["next"]:
+                results = await loop.run_in_executor(None, lambda: self.sp.next(results))
+                items.extend(results["items"])
+
+            for item in items:
+                track = item.get("track")
+                if track:
+                    queries.append(f"{track['artists'][0]['name']} - {track['name']}")
+        elif "album" in query:
+            results = await loop.run_in_executor(None, lambda: self.sp.album_tracks(query))
+            items = list(results["items"])
+            while results["next"]:
+                results = await loop.run_in_executor(None, lambda: self.sp.next(results))
+                items.extend(results["items"])
+
+            for track in items:
+                queries.append(f"{track['artists'][0]['name']} - {track['name']}")
+
+        return queries
+
+    async def _start_next(self, guild_id: int, player: wavelink.Player) -> None:
+        if player.playing or player.paused:
+            return
+
+        if player.queue.is_empty:
+            self.current_song[guild_id] = None
+            return
+
+        track = player.queue.get()
+        self.current_song[guild_id] = track
+        self.skip_votes[guild_id] = set()
+        self.stop_votes[guild_id] = set()
+        await player.play(track, volume=self.volumes.get(guild_id, 50))
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
+        player = payload.player
+        if not player or not player.guild:
+            return
+
+        guild_id = player.guild.id
+        ended_track = payload.track
+        loop_mode = self.loops.get(guild_id, 0)
+
+        if loop_mode == 1 and ended_track:
+            try:
+                player.queue.put_at(0, ended_track)
+            except Exception:
+                await player.queue.put_wait(ended_track)
+        elif loop_mode == 2 and ended_track:
+            await player.queue.put_wait(ended_track)
+
+        await self._start_next(guild_id, player)
+
+    @commands.command(name="join", aliases=["j"])
+    @ensure_voice()
+    async def play_join(self, ctx: commands.Context) -> None:
+        player = ctx.voice_client
+        channel = ctx.author.voice.channel
+
+        if isinstance(player, wavelink.Player):
+            await player.move_to(channel)
+        else:
+            await channel.connect(cls=wavelink.Player, self_deaf=True)
+
+        await ctx.send(f"Joined {channel}")
+
+    @commands.command(name="leave", aliases=["l", "dc"])
+    @ensure_voice()
+    async def play_leave(self, ctx: commands.Context) -> None:
+        player = ctx.voice_client
+        if isinstance(player, wavelink.Player):
+            await player.disconnect()
+
+            self.current_song.pop(ctx.guild.id, None)
+            self.loops.pop(ctx.guild.id, None)
+            self.skip_votes.pop(ctx.guild.id, None)
+            self.stop_votes.pop(ctx.guild.id, None)
+
+            await ctx.send("Left the channel")
+            return
+
+        await ctx.send("I am not in a voice channel!")
+
+    @commands.command(name="play", aliases=["p"])
+    @ensure_voice()
+    async def play(self, ctx: commands.Context, *, query: str) -> None:
+        player = await self._ensure_player(ctx)
+
+        if "spotify.com" in query or "spotify:" in query:
+            await ctx.send("Spotify link detected. Fetching tracks...")
+            try:
+                queries = await self._spotify_to_queries(query)
+            except Exception as e:
+                return await ctx.send(f"Error fetching Spotify data: {e}")
+
+            if not queries:
+                return await ctx.send("No tracks found in Spotify link.")
+
+            added = 0
+            for search_query in queries:
+                track = await self._search_single_track(search_query)
+                if not track:
+                    continue
+
+                try:
+                    track.extras = {"requester_id": ctx.author.id}
+                except Exception:
+                    pass
+
+                await player.queue.put_wait(track)
+                added += 1
+
+            if not added:
+                return await ctx.send("Could not resolve Spotify tracks to playable sources.")
+
+            await ctx.send(f"Added **{added}** Spotify track(s) to queue.")
+            await self._start_next(ctx.guild.id, player)
+            return
+
+        await ctx.send(f"Searching for **{query}**...")
+        result = await wavelink.Playable.search(query if self._is_url(query) else f"ytsearch:{query}")
+
+        if not result:
+            return await ctx.send("No songs found.")
+
+        if isinstance(result, wavelink.Playlist):
+            for track in result.tracks:
+                try:
+                    track.extras = {"requester_id": ctx.author.id}
+                except Exception:
+                    pass
+                await player.queue.put_wait(track)
+
+            await ctx.send(f"Added playlist **{result.name}** with **{len(result.tracks)}** songs.")
+        else:
+            track = result[0]
+            try:
+                track.extras = {"requester_id": ctx.author.id}
+            except Exception:
+                pass
+            await player.queue.put_wait(track)
+            await ctx.send(f"Added to queue: **{track.title}**")
+
+        await self._start_next(ctx.guild.id, player)
+
+    @commands.command(name="pause", aliases=["ps"])
+    @ensure_voice()
+    async def pause(self, ctx: commands.Context) -> None:
+        player = ctx.voice_client
+        if isinstance(player, wavelink.Player) and player.playing:
+            await player.pause(True)
+            await ctx.send("Paused ⏸️")
+
+    @commands.command(name="resume", aliases=["res"])
+    @ensure_voice()
+    async def resume(self, ctx: commands.Context) -> None:
+        player = ctx.voice_client
+        if isinstance(player, wavelink.Player) and player.paused:
+            await player.pause(False)
+            await ctx.send("Resumed ▶️")
+
+    @commands.command(name="loop", aliases=["lp"])
+    @ensure_voice()
+    async def loop(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
+        current_state = self.loops.get(ctx.guild.id, 0)
+
+        if mode:
+            mode = mode.lower()
+            if mode == "all":
+                new_state = 2
+            elif mode in ["current", "song", "one"]:
+                new_state = 1
+            elif mode in ["off", "none", "disable"]:
+                new_state = 0
+            else:
+                return await ctx.send("Invalid loop mode. Use `all`, `current`, or `off`.")
+        else:
+            new_state = (current_state + 1) % 3
+
+        self.loops[ctx.guild.id] = new_state
+        msg = "Loop disabled ➡️"
+        if new_state == 1:
+            msg = "Looping **Current Song** 🔂"
+        elif new_state == 2:
+            msg = "Looping **Queue** 🔁"
+        await ctx.send(msg)
+
+    @commands.command(name="stop", aliases=["st"])
+    @ensure_voice()
+    async def stop(self, ctx: commands.Context) -> None:
+        player = ctx.voice_client
+        if not isinstance(player, wavelink.Player):
+            return await ctx.send("Not connected to a voice channel.")
+
+        guild_id = ctx.guild.id
+        current = self.current_song.get(guild_id)
+
+        can_stop = False
+        if self._requester_from_track(current) == ctx.author.id:
+            can_stop = True
+        elif ctx.author.guild_permissions.administrator:
+            can_stop = True
+
+        if not can_stop:
+            self.stop_votes.setdefault(guild_id, set())
+            if ctx.author.id in self.stop_votes[guild_id]:
+                return await ctx.send("You have already voted to stop.")
+
+            self.stop_votes[guild_id].add(ctx.author.id)
+            votes_needed = 3
+            current_votes = len(self.stop_votes[guild_id])
+            if current_votes < votes_needed:
+                return await ctx.send(f"🗳️ Vote to **stop** registered. [{current_votes}/{votes_needed}]")
+
+        player.queue.clear()
+        await player.skip()
+        self.current_song[guild_id] = None
+        self.loops[guild_id] = 0
+        self.skip_votes[guild_id] = set()
+        self.stop_votes[guild_id] = set()
+        await ctx.send("⏹️ Stopped and cleared queue.")
+
+    @commands.command(name="skip", aliases=["s", "next"])
+    @ensure_voice()
+    async def skip(self, ctx: commands.Context, index: Optional[int] = None) -> None:
+        player = ctx.voice_client
+        if not isinstance(player, wavelink.Player) or not (player.playing or player.paused):
+            return await ctx.send("Nothing is playing.")
+
+        guild_id = ctx.guild.id
+        current = self.current_song.get(guild_id)
+
+        can_skip = False
+        if self._requester_from_track(current) == ctx.author.id:
+            can_skip = True
+        elif ctx.author.guild_permissions.administrator:
+            can_skip = True
+
+        if not can_skip:
+            self.skip_votes.setdefault(guild_id, set())
+            if ctx.author.id in self.skip_votes[guild_id]:
+                return await ctx.send("You have already voted to skip.")
+
+            self.skip_votes[guild_id].add(ctx.author.id)
+            votes_needed = 3
+            current_votes = len(self.skip_votes[guild_id])
+            if current_votes < votes_needed:
+                return await ctx.send(f"🗳️ Vote to **skip** registered. [{current_votes}/{votes_needed}]")
+
+        if index is not None:
+            queue_items = list(player.queue)
+            if not queue_items:
+                return await ctx.send("Queue is empty, cannot skip to specific index.")
+            if index < 1 or index > len(queue_items):
+                return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(queue_items)}.")
+
+            target = queue_items.pop(index - 1)
+            player.queue.clear()
+            await player.queue.put_wait(target)
+            for item in queue_items:
+                await player.queue.put_wait(item)
+            await ctx.send(f"⏭️ Skipping to **{target.title}**...")
+
+        await player.skip()
+        await ctx.send("⏭️ Skipped song.")
+
+    @commands.command(name="queue", aliases=["q"])
+    @ensure_voice()
+    async def queue(self, ctx: commands.Context) -> None:
+        player = ctx.voice_client
+        if not isinstance(player, wavelink.Player):
+            return await ctx.send("Queue is empty.")
+
+        queue_items = list(player.queue)
+        if not queue_items:
+            return await ctx.send("Queue is empty.")
+
+        max_lines = 10
+        queue_str = "\n".join([f"{i + 1}. {item.title}" for i, item in enumerate(queue_items[:max_lines])])
+        if len(queue_items) > max_lines:
+            queue_str += f"\n... and {len(queue_items) - max_lines} more."
+
+        await ctx.send(f"**Current Queue ({len(queue_items)} songs):**\n{queue_str}")
+
+    @commands.command(name="volume", aliases=["v", "vol"])
+    @ensure_voice()
+    async def volume(self, ctx: commands.Context, volume: int) -> None:
+        if volume < 0 or volume > 100:
+            return await ctx.send("Volume must be between 0 and 100.")
+
+        player = ctx.voice_client
+        if not isinstance(player, wavelink.Player):
+            return await ctx.send("Not connected to a voice channel.")
+
+        self.volumes[ctx.guild.id] = volume
+        await player.set_volume(volume)
+        await ctx.send(f"🔊 Volume set to **{volume}%**")
+
+    @commands.command(name="nowplaying", aliases=["np", "current"])
+    @ensure_voice()
+    async def now_playing(self, ctx: commands.Context) -> None:
+        player = ctx.voice_client
+        if not isinstance(player, wavelink.Player) or not player.current:
+            return await ctx.send("Nothing is currently playing.")
+
+        track = player.current
+        position_ms = max(0, int(player.position))
+        duration_ms = int(track.length or 0)
+
+        if duration_ms > 0:
+            progress = min(position_ms / duration_ms, 1.0)
+            bar_len = 20
+            filled = int(progress * bar_len)
+            bar = "▬" * filled + "🔘" + "▬" * (bar_len - filled)
+            current_str = str(datetime.timedelta(seconds=position_ms // 1000))
+            total_str = str(datetime.timedelta(seconds=duration_ms // 1000))
+            time_str = f"{current_str} / {total_str}"
+        else:
+            bar = "🔘" + "▬" * 20
+            current_str = str(datetime.timedelta(seconds=position_ms // 1000))
+            time_str = f"{current_str} / Live"
+
+        embed = discord.Embed(
+            title="Now Playing 🎵",
+            description=f"[{track.title}]({track.uri or ''})",
+            color=discord.Color.blue(),
+        )
+        if track.artwork:
+            embed.set_thumbnail(url=track.artwork)
+
+        embed.add_field(name="Progress", value=f"`{time_str}`\n`{bar}`", inline=False)
+        requester_id = self._requester_from_track(track)
+        requester = ctx.guild.get_member(requester_id) if requester_id else None
+        req_name = requester.display_name if requester else "Unknown"
+        embed.set_footer(
+            text=f"Requested by {req_name}",
+            icon_url=requester.display_avatar.url if requester else None,
+        )
+        await ctx.send(embed=embed)
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(MusicLavalink(bot))

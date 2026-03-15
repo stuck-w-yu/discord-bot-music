@@ -131,7 +131,7 @@ class General(commands.Cog):
         guide = (
             "1. Masuk ke Voice Channel.\n"
             "2. Ketik `!p <judul lagu>` untuk memutar musik.\n"
-            "3. Nikmati musik dan dapatkan XP!"
+            "3. Nikmati musik!"
         )
         embed.add_field(name="📖 Cara Penggunaan", value=guide, inline=False)
 
@@ -149,14 +149,6 @@ class General(commands.Cog):
             "`!join (j)` / `!leave (l)`"
         )
         embed.add_field(name="🎵 Music", value=music_cmds, inline=False)
-        
-        # Leveling
-        level_cmds = (
-            "`!level (lvl)` - Cek level & XP\n"
-            "`!xyzprofile (pf)` - Lihat profil\n"
-            "`!leaderboard (lb, top)` - Top 10 users"
-        )
-        embed.add_field(name="📊 Leveling", value=level_cmds, inline=False)
         
         # General
         general_cmds = (

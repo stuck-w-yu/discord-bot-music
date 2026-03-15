@@ -7,7 +7,6 @@ ffmpeg-python
 
 brotli
 static-ffmpeg
-aiosqlite
 spotipy
 psutil
 wavelink

@@ -1,6 +1,6 @@
 # Discord Music Bot
 
-A feature-rich Discord bot for playing music and tracking user levels.
+A feature-rich Discord bot for playing music.
 
 ## 🍪 Fixing YouTube Sign-in Errors
 If you see errors like `Sign in to confirm you’re not a bot`, you need to provide a `cookies.txt` file.
@@ -21,9 +21,7 @@ If you are deploying on Coolify or Docker, you can use an Environment Variable i
 
 ## 🛠️ Usage
 - 🎵 High-quality music playback from YouTube & Spotify (metadata search)
-- 📈 Leveling system with text & voice XP
 - ⏯️ Music controls (Play, Pause, Skip, Stop, Queue)
-- 📝 User profiles and leaderboards
 - 🐳 Docker support for easy deployment
 
 ## Lavalink Mode (Recommended for Stability)
@@ -48,7 +46,7 @@ Catatan Spotify:
 4. Run the bot: `python main.py`
 
 ## Docker Deployment (Recommended)
-To ensure data persistence (levels, XP) across restarts, use Docker Compose:
+To ensure data persistence across restarts, use Docker Compose:
 
 1. Build and start the container:
    ```bash
@@ -77,7 +75,7 @@ If you prefer using just the `Dockerfile`:
    - **Volume Name**: `discord-bot-data` (or similar)
    - **Destination Path**: `/app/data`
    
-   *One-time setup: If you forgot this step and the bot restarts, levels will be lost.*
+   *One-time setup: If you forgot this step and the bot restarts, runtime data will be lost.*
 
 ## Commands
 - `!play <song/url>` (p) - Play a song or playlist (YouTube/Spotify)
@@ -90,7 +88,4 @@ If you prefer using just the `Dockerfile`:
 - `!loop` (lp) - Toggle loop mode (Off -> Current -> Queue)
 - `!volume <0-100>` (v) - Set volume
 - `!join` (j) / `!leave` (l) - Join/Leave voice channel
-- `!level` (lvl) - Check your level and XP
-- `!leaderboard` (lb) - View server leaderboard
-- `!xyzprofile` (pf) - View rich profile card
 - `!svlogs` (serverstats) - View server statistics & system info

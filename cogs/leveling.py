@@ -13,13 +13,18 @@ CHAT_COOLDOWN = 60
 XP_PER_LEVEL = 600
 
 class Leveling(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.chat_cooldowns = {} # {member_id: last_message_timestamp}
+        self.chat_cooldowns: dict[int, float] = {} # {member_id: last_message_timestamp}
+        self.pending_updates: dict[tuple[int, int], tuple[int, int]] = {} # {(user_id, guild_id): (time_added, xp_added)}
         self.voice_xp_loop.start()
+        self.db_flush_loop.start()
 
     def cog_unload(self):
         self.voice_xp_loop.cancel()
+        self.db_flush_loop.cancel()
+        if self.pending_updates:
+            asyncio.create_task(self.flush_to_db())
 
     async def cog_load(self):
         # Ensure data directory exists
@@ -52,10 +57,10 @@ class Leveling(commands.Cog):
             await db.commit()
         print("Leveling Database Initialized")
 
-    def calculate_level(self, xp):
+    def calculate_level(self, xp: int) -> int:
         return 1 + int(xp / XP_PER_LEVEL)
 
-    async def add_xp(self, user_id, guild_id, amount, db):
+    async def add_xp(self, user_id: int, guild_id: int, amount: int, db: aiosqlite.Connection) -> bool:
         cursor = await db.execute('SELECT xp, total_time, level FROM user_stats WHERE user_id = ?', (user_id,))
         row = await cursor.fetchone()
 
@@ -72,38 +77,58 @@ class Leveling(commands.Cog):
                              (user_id, guild_id, new_level, new_xp))
             return False
 
-    async def update_voice_stats_bulk(self, updates):
-        """
-        Updates updates: list of (user_id, guild_id)
-        Adds VOICE_TIME_PER_TICK seconds and VOICE_XP_PER_TICK XP to each.
-        """
-        if not updates:
+    async def flush_to_db(self):
+        if not self.pending_updates:
             return
 
+        updates = self.pending_updates.copy()
+        self.pending_updates.clear()
+
         async with aiosqlite.connect(self.db_path) as db:
-            for user_id, guild_id in updates:
-                # 1. Get current stats
-                cursor = await db.execute('SELECT total_time, xp, level FROM user_stats WHERE user_id = ?', (user_id,))
-                row = await cursor.fetchone()
-                
-                if row:
-                    total_time, xp, level = row
-                    new_time = total_time + VOICE_TIME_PER_TICK
-                    new_xp = xp + VOICE_XP_PER_TICK
+            # Fetch existing records
+            user_ids = [u[0] for u in updates.keys()]
+            placeholders = ','.join(['?'] * len(user_ids))
+            
+            cursor = await db.execute(f'SELECT user_id, guild_id, total_time, xp, level, songs_played FROM user_stats WHERE user_id IN ({placeholders})', user_ids)
+            existing_rows = await cursor.fetchall()
+            existing_dict = {row[0]: row for row in existing_rows}
+
+            to_update = []
+            to_insert = []
+
+            for (user_id, guild_id), (added_time, added_xp) in updates.items():
+                if user_id in existing_dict:
+                    row = existing_dict[user_id]
+                    # row: user_id, guild_id, total_time, xp, level, songs_played
+                    new_time = row[2] + added_time
+                    new_xp = row[3] + added_xp
                     new_level = self.calculate_level(new_xp)
-                    
-                    await db.execute('UPDATE user_stats SET total_time = ?, xp = ?, level = ? WHERE user_id = ?', 
-                                     (new_time, new_xp, new_level, user_id))
+                    to_update.append((new_time, new_xp, new_level, user_id))
                 else:
-                    # Initialize
-                    new_xp = VOICE_XP_PER_TICK
-                    new_level = self.calculate_level(new_xp)
-                    await db.execute('INSERT INTO user_stats (user_id, guild_id, total_time, level, xp, songs_played) VALUES (?, ?, ?, ?, ?, 0)', 
-                                     (user_id, guild_id, VOICE_TIME_PER_TICK, new_level, new_xp))
+                    new_level = self.calculate_level(added_xp)
+                    to_insert.append((user_id, guild_id, added_time, new_level, added_xp, 0))
+
+            if to_update:
+                await db.executemany('UPDATE user_stats SET total_time = ?, xp = ?, level = ? WHERE user_id = ?', to_update)
+            if to_insert:
+                await db.executemany('INSERT INTO user_stats (user_id, guild_id, total_time, level, xp, songs_played) VALUES (?, ?, ?, ?, ?, ?)', to_insert)
             
             await db.commit()
 
-    async def increment_songs_played(self, user_id, guild_id):
+    async def update_voice_stats_bulk(self, updates: list[tuple[int, int]]):
+        """
+        updates: list of (user_id, guild_id)
+        Added to in-memory cache instead of DB directly to optimize I/O.
+        """
+        for user_id, guild_id in updates:
+            key = (user_id, guild_id)
+            if key not in self.pending_updates:
+                self.pending_updates[key] = (0, 0)
+            
+            curr_time, curr_xp = self.pending_updates[key]
+            self.pending_updates[key] = (curr_time + VOICE_TIME_PER_TICK, curr_xp + VOICE_XP_PER_TICK)
+
+    async def increment_songs_played(self, user_id: int, guild_id: int):
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT songs_played FROM user_stats WHERE user_id = ?', (user_id,))
             row = await cursor.fetchone()
@@ -118,7 +143,7 @@ class Leveling(commands.Cog):
 
     @tasks.loop(seconds=5)
     async def voice_xp_loop(self):
-        updates = []
+        updates: list[tuple[int, int]] = []
         for guild in self.bot.guilds:
             for channel in guild.voice_channels:
                 if len(channel.members) == 0:
@@ -127,7 +152,6 @@ class Leveling(commands.Cog):
                     if member.bot:
                         continue
                     if member.voice.self_deaf or member.voice.deaf:
-                        # Optional: Don't award XP if deafened?
                         pass
                     
                     updates.append((member.id, guild.id))
@@ -135,12 +159,20 @@ class Leveling(commands.Cog):
         if updates:
             await self.update_voice_stats_bulk(updates)
 
+    @tasks.loop(minutes=2)
+    async def db_flush_loop(self):
+        await self.flush_to_db()
+
     @voice_xp_loop.before_loop
     async def before_voice_loop(self):
         await self.bot.wait_until_ready()
 
+    @db_flush_loop.before_loop
+    async def before_db_flush_loop(self):
+        await self.bot.wait_until_ready()
+
     @commands.Cog.listener()
-    async def on_message(self, message):
+    async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
 
@@ -160,7 +192,7 @@ class Leveling(commands.Cog):
             await db.commit()
 
     @commands.command(name='level', aliases=['lvl', 'rank'])
-    async def level(self, ctx, member: discord.Member = None):
+    async def level(self, ctx: commands.Context, member: discord.Member = None):
         member = member or ctx.author
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT total_time, level, xp FROM user_stats WHERE user_id = ?', (member.id,))

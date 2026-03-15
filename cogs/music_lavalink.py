@@ -1,7 +1,7 @@
 import asyncio
 import datetime
 import os
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Union
 
 import discord
 from discord.ext import commands
@@ -31,6 +31,8 @@ class MusicLavalink(commands.Cog):
         self.skip_votes: Dict[int, Set[int]] = {}
         self.stop_votes: Dict[int, Set[int]] = {}
         self.volumes: Dict[int, int] = {}
+        self.last_np_msg: Dict[int, Optional[discord.Message]] = {}
+        self.last_channel: Dict[int, int] = {}
         self.node_connected = False
 
         client_id = os.getenv("SPOTIPY_CLIENT_ID")
@@ -162,6 +164,28 @@ class MusicLavalink(commands.Cog):
         self.stop_votes[guild_id] = set()
         await player.play(track, volume=self.volumes.get(guild_id, 50))
 
+        # Send Now Playing message with buttons
+        channel_id = self.last_channel.get(guild_id)
+        if channel_id:
+            channel = self.bot.get_channel(channel_id)
+            if channel and isinstance(channel, discord.abc.Messageable):
+                view = MusicPlayerView(self, channel)
+
+                # Delete old NP message
+                if guild_id in self.last_np_msg and self.last_np_msg[guild_id]:
+                    try:
+                        await self.last_np_msg[guild_id].delete()
+                    except:
+                        pass
+
+                loop_mode = self.loops.get(guild_id, 0)
+                loop_msg = ""
+                if loop_mode == 1: loop_msg = "🔂 Loop Current"
+                elif loop_mode == 2: loop_msg = "🔁 Loop All"
+
+                msg = await channel.send(f"Now playing: **{track.title}** {loop_msg}", view=view)
+                self.last_np_msg[guild_id] = msg
+
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
         player = payload.player
@@ -215,6 +239,7 @@ class MusicLavalink(commands.Cog):
     @commands.command(name="play", aliases=["p"])
     @ensure_voice()
     async def play(self, ctx: commands.Context, *, query: str) -> None:
+        self.last_channel[ctx.guild.id] = ctx.channel.id
         player = await self._ensure_player(ctx)
 
         if "spotify.com" in query or "spotify:" in query:
@@ -227,25 +252,40 @@ class MusicLavalink(commands.Cog):
             if not queries:
                 return await ctx.send("No tracks found in Spotify link.")
 
-            added = 0
-            for search_query in queries:
-                track = await self._search_single_track(search_query)
-                if not track:
-                    continue
+            await ctx.send(f"Found {len(queries)} tracks. Resolving and adding to queue...")
 
+            # Concurrent Spotify Loading
+            sem = asyncio.Semaphore(5)
+            added_count = 0
+
+            async def fetch_and_queue(search_query: str) -> None:
+                nonlocal added_count
+                async with sem:
+                    track = await self._search_single_track(search_query)
+                    if track:
+                        try:
+                            track.extras = {"requester_id": ctx.author.id}
+                        except Exception:
+                            pass
+                        await player.queue.put_wait(track)
+                        added_count += 1
+
+            # Resolve first track separately to start playing immediately
+            first_track = await self._search_single_track(queries[0])
+            if first_track:
                 try:
-                    track.extras = {"requester_id": ctx.author.id}
+                    first_track.extras = {"requester_id": ctx.author.id}
                 except Exception:
                     pass
+                await player.queue.put_wait(first_track)
+                added_count += 1
+                await self._start_next(ctx.guild.id, player)
 
-                await player.queue.put_wait(track)
-                added += 1
+            if len(queries) > 1:
+                tasks = [fetch_and_queue(sq) for sq in queries[1:]]
+                await asyncio.gather(*tasks)
 
-            if not added:
-                return await ctx.send("Could not resolve Spotify tracks to playable sources.")
-
-            await ctx.send(f"Added **{added}** Spotify track(s) to queue.")
-            await self._start_next(ctx.guild.id, player)
+            await ctx.send(f"✅ Finished adding all {added_count} Spotify tracks to queue.")
             return
 
         await ctx.send(f"Searching for **{query}**...")
@@ -468,6 +508,83 @@ class MusicLavalink(commands.Cog):
             icon_url=requester.display_avatar.url if requester else None,
         )
         await ctx.send(embed=embed)
+
+
+class MusicPlayerView(discord.ui.View):
+    def __init__(self, cog: MusicLavalink, channel: discord.abc.Messageable):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild = getattr(channel, 'guild', None)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.voice:
+             await interaction.response.send_message("You need to be in a voice channel to use this button.", ephemeral=True)
+             return False
+        vc = interaction.guild.voice_client
+        if vc and vc.channel != interaction.user.voice.channel:
+             await interaction.response.send_message("You need to be in the same voice channel as the bot to use this button.", ephemeral=True)
+             return False
+        return True
+
+    @discord.ui.button(label="⏯️ Pause/Resume", style=discord.ButtonStyle.primary, custom_id="lavalink_pause_resume")
+    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player: wavelink.Player = interaction.guild.voice_client # type: ignore
+        if not player or not player.current:
+             await interaction.response.send_message("Nothing is playing!", ephemeral=True)
+             return
+        
+        if player.paused:
+            await player.pause(False)
+            await interaction.response.send_message("▶️ Resumed", ephemeral=True)
+        else:
+            await player.pause(True)
+            await interaction.response.send_message("⏸️ Paused", ephemeral=True)
+
+    @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id="lavalink_skip")
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player: wavelink.Player = interaction.guild.voice_client # type: ignore
+        if not player or not player.current:
+            return await interaction.response.send_message("Nothing to skip", ephemeral=True)
+            
+        await player.skip()
+        await interaction.response.send_message("⏭️ Skipped")
+
+    @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.success, custom_id="lavalink_loop")
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        guild_id = interaction.guild.id
+        current_state = self.cog.loops.get(guild_id, 0)
+        new_state = (current_state + 1) % 3
+        self.cog.loops[guild_id] = new_state
+        msg = "Loop disabled ➡️"
+        if new_state == 1: msg = "Looping **Current Song** 🔂"
+        elif new_state == 2: msg = "Looping **Queue** 🔁"
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="lavalink_stop")
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player: wavelink.Player = interaction.guild.voice_client # type: ignore
+        if not player:
+            return await interaction.response.send_message("Not connected", ephemeral=True)
+            
+        guild_id = interaction.guild.id
+        player.queue.clear()
+        await player.skip()
+        self.cog.current_song[guild_id] = None
+        self.cog.loops[guild_id] = 0
+        await interaction.response.send_message("⏹️ Stopped and queue cleared")
+
+    @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="lavalink_queue")
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player: wavelink.Player = interaction.guild.voice_client # type: ignore
+        if not player or player.queue.is_empty:
+            return await interaction.response.send_message("Queue is empty.", ephemeral=True)
+            
+        queue_items = list(player.queue)
+        max_lines = 10
+        queue_str = "\n".join([f"{i+1}. {item.title}" for i, item in enumerate(queue_items[:max_lines])])
+        if len(queue_items) > max_lines:
+            queue_str += f"\n... and {len(queue_items) - max_lines} more."
+        await interaction.response.send_message(f"**Current Queue ({len(queue_items)} songs):**\n{queue_str}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

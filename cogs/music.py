@@ -74,6 +74,7 @@ class Music(commands.Cog):
         self.volumes: Dict[int, float] = {} # {guild_id: volume_float}
         self.current_song: Dict[int, Optional[Dict[str, Any]]] = {} # {guild_id: song_entry}
         self.last_np_msg: Dict[int, Optional[discord.Message]] = {} # {guild_id: message}
+        self.last_channel: Dict[int, int] = {} # {guild_id: channel_id}
         self.start_times: Dict[int, float] = {} # {guild_id: time.time()}
         self.pause_starts: Dict[int, float] = {} # {guild_id: time.time()}
         self.pause_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
@@ -236,20 +237,22 @@ class Music(commands.Cog):
             if vc and vc.is_connected():
                  vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next_internal(guild_id, vc, ctx), self.bot.loop))
                  
-                 if ctx:
-                     view = MusicPlayerView(self, ctx)
-                     loop_msg = ""
-                     if loops == 1: loop_msg = "🔂 Loop Current"
-                     elif loops == 2: loop_msg = "🔁 Loop All"
-                     
-                     if guild_id in self.last_np_msg and self.last_np_msg[guild_id]:
-                         try:
-                            await self.last_np_msg[guild_id].delete()
-                         except:
-                            pass
+                 if ctx or guild_id in self.last_channel:
+                     channel = ctx.channel if ctx else self.bot.get_channel(self.last_channel[guild_id])
+                     if channel and isinstance(channel, discord.abc.Messageable):
+                         view = MusicPlayerView(self, ctx or channel) # type: ignore
+                         loop_msg = ""
+                         if loops == 1: loop_msg = "🔂 Loop Current"
+                         elif loops == 2: loop_msg = "🔁 Loop All"
+                         
+                         if guild_id in self.last_np_msg and self.last_np_msg[guild_id]:
+                             try:
+                                await self.last_np_msg[guild_id].delete()
+                             except:
+                                pass
 
-                     msg = await ctx.send(f'Now playing: **{title}** {loop_msg}', view=view)
-                     self.last_np_msg[guild_id] = msg
+                         msg = await channel.send(f'Now playing: **{title}** {loop_msg}', view=view)
+                         self.last_np_msg[guild_id] = msg
             
         except Exception as e:
             print(f"Error processing song: {e}")
@@ -394,6 +397,7 @@ class Music(commands.Cog):
     @commands.command(name='play', aliases=['p'])
     @ensure_voice()
     async def play(self, ctx: commands.Context, *, query: str) -> None:
+        self.last_channel[ctx.guild.id] = ctx.channel.id
         if not ctx.voice_client:
             try:
                 if ctx.author.voice:

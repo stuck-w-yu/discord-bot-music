@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import os
 import asyncio
+import traceback
 import static_ffmpeg
 from dotenv import load_dotenv
 
@@ -66,9 +67,11 @@ class MusicBot(commands.Bot):
             else:
                 await ctx.send(f"⚠️ An error occurred: {original}")
                 print(f"[ERROR] User: {user} | Command: {command} | Invoke Error: {original}")
+                traceback.print_exception(type(original), original, original.__traceback__)
         else:
             await ctx.send(f"❌ Error: {error}")
             print(f"[ERROR] User: {user} | Command: {content} | Unhandled Error: {error}")
+            traceback.print_exception(type(error), error, error.__traceback__)
 
 bot = MusicBot()
 

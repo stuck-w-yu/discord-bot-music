@@ -1,7 +1,11 @@
 import asyncio
 import datetime
+import json
 import os
-from typing import Dict, List, Optional, Set, Union
+import re
+from typing import Any, Dict, List, Optional, Set, Union
+import urllib.parse
+import urllib.request
 
 import discord
 from discord.ext import commands
@@ -150,6 +154,146 @@ class MusicLavalink(commands.Cog):
 
         return queries
 
+    def _spotify_track_url_from_query(self, query: str) -> Optional[str]:
+        if "open.spotify.com/track/" in query:
+            track_part = query.split("open.spotify.com/track/", 1)[1]
+            track_id = track_part.split("?", 1)[0].split("/", 1)[0].strip()
+            if track_id:
+                return f"https://open.spotify.com/track/{track_id}"
+            return None
+
+        if query.startswith("spotify:track:"):
+            parts = query.split(":")
+            if len(parts) >= 3 and parts[2].strip():
+                return f"https://open.spotify.com/track/{parts[2].strip()}"
+
+        return None
+
+    def _spotify_resource_id_from_query(self, query: str, resource: str) -> Optional[str]:
+        web_token = f"open.spotify.com/{resource}/"
+        if web_token in query:
+            resource_part = query.split(web_token, 1)[1]
+            resource_id = resource_part.split("?", 1)[0].split("/", 1)[0].strip()
+            return resource_id or None
+
+        uri_token = f"spotify:{resource}:"
+        if query.startswith(uri_token):
+            parts = query.split(":")
+            if len(parts) >= 3 and parts[2].strip():
+                return parts[2].strip()
+
+        return None
+
+    async def _spotify_public_track_query(self, query: str) -> Optional[str]:
+        track_url = self._spotify_track_url_from_query(query)
+        if not track_url:
+            return None
+
+        oembed_url = f"https://open.spotify.com/oembed?url={urllib.parse.quote(track_url, safe='')}"
+        loop = asyncio.get_event_loop()
+
+        def fetch_title() -> Optional[str]:
+            try:
+                req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                title = payload.get("title")
+                if isinstance(title, str) and title.strip():
+                    return title.strip()
+            except Exception:
+                return None
+            return None
+
+        return await loop.run_in_executor(None, fetch_title)
+
+    async def _spotify_public_collection_queries(self, query: str) -> List[str]:
+        resource = "playlist" if "playlist" in query else "album" if "album" in query else None
+        if not resource:
+            return []
+
+        resource_id = self._spotify_resource_id_from_query(query, resource)
+        if not resource_id:
+            return []
+
+        public_url = f"https://open.spotify.com/{resource}/{resource_id}"
+        loop = asyncio.get_event_loop()
+
+        def fetch_queries() -> List[str]:
+            try:
+                req = urllib.request.Request(
+                    public_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    html = response.read().decode("utf-8", errors="ignore")
+
+                next_data_match = re.search(
+                    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                    html,
+                    flags=re.DOTALL,
+                )
+                if not next_data_match:
+                    return []
+
+                payload = json.loads(next_data_match.group(1))
+                queries: List[str] = []
+
+                def walk(node: Any) -> None:
+                    if isinstance(node, dict):
+                        name_raw = node.get("name")
+                        uri_raw = node.get("uri")
+                        type_raw = node.get("type")
+                        artists_raw = node.get("artists")
+
+                        if isinstance(name_raw, str) and name_raw.strip():
+                            is_track = (
+                                (isinstance(uri_raw, str) and uri_raw.startswith("spotify:track:"))
+                                or type_raw == "track"
+                            )
+                            if is_track:
+                                title = name_raw.strip()
+                                artist = ""
+                                if isinstance(artists_raw, list) and artists_raw:
+                                    first_artist = artists_raw[0]
+                                    if isinstance(first_artist, dict):
+                                        first_name = first_artist.get("name")
+                                        if isinstance(first_name, str):
+                                            artist = first_name.strip()
+
+                                if artist and artist.lower() not in title.lower():
+                                    queries.append(f"{artist} - {title}")
+                                else:
+                                    queries.append(title)
+
+                        for value in node.values():
+                            walk(value)
+                        return
+
+                    if isinstance(node, list):
+                        for item in node:
+                            walk(item)
+
+                walk(payload)
+                deduped = list(dict.fromkeys(queries))
+                return deduped[:200]
+            except Exception:
+                return []
+
+        return await loop.run_in_executor(None, fetch_queries)
+
+    async def _spotify_public_queries(self, query: str) -> List[str]:
+        track_query = await self._spotify_public_track_query(query)
+        if track_query:
+            return [track_query]
+
+        if "playlist" in query or "album" in query:
+            return await self._spotify_public_collection_queries(query)
+
+        return []
+
     async def _start_next(self, guild_id: int, player: wavelink.Player) -> None:
         if player.playing or player.paused:
             return
@@ -244,10 +388,29 @@ class MusicLavalink(commands.Cog):
 
         if "spotify.com" in query or "spotify:" in query:
             await ctx.send("Spotify link detected. Fetching tracks...")
+            queries: List[str] = []
+            spotify_error: Optional[str] = None
             try:
                 queries = await self._spotify_to_queries(query)
             except Exception as e:
-                return await ctx.send(f"Error fetching Spotify data: {e}")
+                spotify_error = str(e)
+
+            if not queries:
+                fallback_queries = await self._spotify_public_queries(query)
+                if fallback_queries:
+                    queries = fallback_queries
+                    if len(fallback_queries) == 1:
+                        await ctx.send("Spotify API tidak tersedia, pakai fallback publik untuk track tunggal.")
+                    else:
+                        await ctx.send(
+                            f"Spotify API tidak tersedia, pakai fallback publik playlist/album ({len(fallback_queries)} track ditemukan)."
+                        )
+                elif spotify_error:
+                    return await ctx.send(f"Error fetching Spotify data: {spotify_error}")
+                elif not self.sp:
+                    return await ctx.send(
+                        "Spotify credentials tidak ditemukan, dan fallback publik tidak bisa membaca link Spotify ini."
+                    )
 
             if not queries:
                 return await ctx.send("No tracks found in Spotify link.")

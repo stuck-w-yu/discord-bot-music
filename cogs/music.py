@@ -10,6 +10,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import time
 import datetime
 import json
+import re
 import urllib.parse
 import urllib.request
 from typing import Optional, Dict, List, Any, Set, cast, Union
@@ -338,6 +339,21 @@ class Music(commands.Cog):
 
         return None
 
+    def _spotify_resource_id_from_query(self, query: str, resource: str) -> Optional[str]:
+        web_token = f"open.spotify.com/{resource}/"
+        if web_token in query:
+            resource_part = query.split(web_token, 1)[1]
+            resource_id = resource_part.split("?", 1)[0].split("/", 1)[0].strip()
+            return resource_id or None
+
+        uri_token = f"spotify:{resource}:"
+        if query.startswith(uri_token):
+            parts = query.split(":")
+            if len(parts) >= 3 and parts[2].strip():
+                return parts[2].strip()
+
+        return None
+
     async def _spotify_public_track_query(self, query: str) -> Optional[str]:
         # Public fallback without Spotify API key; only supports single track links.
         track_url = self._spotify_track_url_from_query(query)
@@ -361,15 +377,96 @@ class Music(commands.Cog):
 
         return await loop.run_in_executor(None, fetch_title)
 
+    async def _spotify_public_collection_queries(self, query: str) -> List[str]:
+        # Scrape playlist/album page data as a best-effort fallback when Spotify API is unavailable.
+        resource = "playlist" if "playlist" in query else "album" if "album" in query else None
+        if not resource:
+            return []
+
+        resource_id = self._spotify_resource_id_from_query(query, resource)
+        if not resource_id:
+            return []
+
+        public_url = f"https://open.spotify.com/{resource}/{resource_id}"
+        loop = asyncio.get_event_loop()
+
+        def fetch_queries() -> List[str]:
+            try:
+                req = urllib.request.Request(
+                    public_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    html = response.read().decode("utf-8", errors="ignore")
+
+                next_data_match = re.search(
+                    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                    html,
+                    flags=re.DOTALL,
+                )
+                if not next_data_match:
+                    return []
+
+                payload = json.loads(next_data_match.group(1))
+                queries: List[str] = []
+
+                def walk(node: Any) -> None:
+                    if isinstance(node, dict):
+                        name_raw = node.get("name")
+                        uri_raw = node.get("uri")
+                        type_raw = node.get("type")
+                        artists_raw = node.get("artists")
+
+                        if isinstance(name_raw, str) and name_raw.strip():
+                            is_track = (
+                                (isinstance(uri_raw, str) and uri_raw.startswith("spotify:track:"))
+                                or type_raw == "track"
+                            )
+                            if is_track:
+                                title = name_raw.strip()
+                                artist = ""
+                                if isinstance(artists_raw, list) and artists_raw:
+                                    first_artist = artists_raw[0]
+                                    if isinstance(first_artist, dict):
+                                        first_name = first_artist.get("name")
+                                        if isinstance(first_name, str):
+                                            artist = first_name.strip()
+
+                                if artist and artist.lower() not in title.lower():
+                                    queries.append(f"{artist} - {title}")
+                                else:
+                                    queries.append(title)
+
+                        for value in node.values():
+                            walk(value)
+                        return
+
+                    if isinstance(node, list):
+                        for item in node:
+                            walk(item)
+
+                walk(payload)
+                deduped = list(dict.fromkeys(queries))
+                return deduped[:200]
+            except Exception:
+                return []
+
+        return await loop.run_in_executor(None, fetch_queries)
+
     async def _spotify_public_queries(self, query: str) -> List[str]:
         # Best-effort fallback without Spotify API key.
-        # For track links, use oEmbed title. For playlist/album, try yt-dlp metadata extraction.
+        # For track links, use oEmbed title. For playlist/album, try yt-dlp first then page scraping.
         track_query = await self._spotify_public_track_query(query)
         if track_query:
             return [track_query]
 
         data = await self._extract_info_async(query)
         if not data:
+            if "playlist" in query or "album" in query:
+                return await self._spotify_public_collection_queries(query)
             return []
 
         entries: List[Dict[str, Any]] = []
@@ -392,6 +489,12 @@ class Music(commands.Cog):
 
         # De-duplicate while preserving order.
         deduped = list(dict.fromkeys(queries))
+        if deduped:
+            return deduped
+
+        if "playlist" in query or "album" in query:
+            return await self._spotify_public_collection_queries(query)
+
         return deduped
 
     @commands.command(name='play', aliases=['p'])

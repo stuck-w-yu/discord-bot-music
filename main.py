@@ -30,9 +30,8 @@ class MusicBot(commands.Bot):
         else:
             await self.load_extension('cogs.music')
             print('Loaded legacy music cog (cogs.music).')
-        await self.load_extension('cogs.leveling')
         await self.load_extension('cogs.general')
-        print("Music and Leveling Cogs Loaded")
+        print("Music and General Cogs Loaded")
 
     async def on_ready(self):
         print(f'Logged in as {self.user.name} ({self.user.id})')

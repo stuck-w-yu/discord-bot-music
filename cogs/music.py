@@ -33,6 +33,7 @@ class Music(commands.Cog):
         self.last_np_msg: Dict[int, Optional[discord.Message]] = {} # {guild_id: message}
         self.start_times: Dict[int, float] = {} # {guild_id: time.time()}
         self.pause_starts: Dict[int, float] = {} # {guild_id: time.time()}
+        self.pause_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
         self.skip_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
         self.stop_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
         self.yt_dlp_options: Dict[str, Any] = {
@@ -172,6 +173,7 @@ class Music(commands.Cog):
             self.start_times[guild_id] = time.time()
             if guild_id in self.pause_starts:
                 del self.pause_starts[guild_id]
+            self.pause_votes[guild_id] = set()
             self.skip_votes[guild_id] = set()
             self.stop_votes[guild_id] = set()
             
@@ -180,11 +182,6 @@ class Music(commands.Cog):
             source.volume = self.volumes.get(guild_id, 0.5)
 
             if vc and vc.is_connected():
-                 if requester_id:
-                     leveling_cog = self.bot.get_cog('Leveling')
-                     if leveling_cog:
-                         await leveling_cog.increment_songs_played(requester_id, guild_id)
-
                  vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next_internal(guild_id, vc, ctx), self.bot.loop))
                  
                  if ctx:
@@ -615,10 +612,33 @@ class MusicPlayerView(discord.ui.View):
         
         if vc.is_paused():
             vc.resume()
+            self.cog.pause_votes[self.ctx.guild.id] = set()
             await interaction.response.send_message("▶️ Resumed", ephemeral=True)
         else:
+            guild_id = self.ctx.guild.id
+            if interaction.user.guild_permissions.administrator:
+                vc.pause()
+                self.cog.pause_votes[guild_id] = set()
+                await interaction.response.send_message("⏸️ Paused", ephemeral=True)
+                return
+
+            if guild_id not in self.cog.pause_votes:
+                self.cog.pause_votes[guild_id] = set()
+
+            if interaction.user.id in self.cog.pause_votes[guild_id]:
+                return await interaction.response.send_message("You have already voted to pause.", ephemeral=True)
+
+            self.cog.pause_votes[guild_id].add(interaction.user.id)
+            votes_needed = self._votes_needed(vc)
+            current_votes = len(self.cog.pause_votes[guild_id])
+            if current_votes < votes_needed:
+                return await interaction.response.send_message(
+                    f"🗳️ Vote to **pause** registered. [{current_votes}/{votes_needed}]"
+                )
+
             vc.pause()
-            await interaction.response.send_message("⏸️ Paused", ephemeral=True)
+            self.cog.pause_votes[guild_id] = set()
+            await interaction.response.send_message("⏸️ Paused")
 
     @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id="music_skip")
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -629,11 +649,7 @@ class MusicPlayerView(discord.ui.View):
         guild_id = self.ctx.guild.id
         current = self.cog.current_song.get(guild_id)
         
-        can_skip = False
-        if current and current.get('requester_id') == interaction.user.id:
-            can_skip = True
-        elif interaction.user.guild_permissions.administrator:
-            can_skip = True
+        can_skip = interaction.user.guild_permissions.administrator
             
         if not can_skip:
             if guild_id not in self.cog.skip_votes:
@@ -641,7 +657,7 @@ class MusicPlayerView(discord.ui.View):
             if interaction.user.id in self.cog.skip_votes[guild_id]:
                 return await interaction.response.send_message("You have already voted to skip.", ephemeral=True)
             self.cog.skip_votes[guild_id].add(interaction.user.id)
-            votes_needed = 3
+            votes_needed = self._votes_needed(vc)
             current_votes = len(self.cog.skip_votes[guild_id])
             if current_votes < votes_needed:
                 return await interaction.response.send_message(f"🗳️ Vote to **skip** registered. [{current_votes}/{votes_needed}]")
@@ -667,11 +683,7 @@ class MusicPlayerView(discord.ui.View):
         guild_id = self.ctx.guild.id
         current = self.cog.current_song.get(guild_id)
         
-        can_stop = False
-        if current and current.get('requester_id') == interaction.user.id:
-            can_stop = True
-        elif interaction.user.guild_permissions.administrator:
-            can_stop = True
+        can_stop = interaction.user.guild_permissions.administrator
             
         if not can_stop:
             if guild_id not in self.cog.stop_votes:
@@ -679,7 +691,7 @@ class MusicPlayerView(discord.ui.View):
             if interaction.user.id in self.cog.stop_votes[guild_id]:
                 return await interaction.response.send_message("You have already voted to stop.", ephemeral=True)
             self.cog.stop_votes[guild_id].add(interaction.user.id)
-            votes_needed = 3
+            votes_needed = self._votes_needed(vc)
             current_votes = len(self.cog.stop_votes[guild_id])
             if current_votes < votes_needed:
                 return await interaction.response.send_message(f"🗳️ Vote to **stop** registered. [{current_votes}/{votes_needed}]")
@@ -688,9 +700,21 @@ class MusicPlayerView(discord.ui.View):
         self.cog.save_queues()
         self.cog.current_song[guild_id] = None
         self.cog.loops[guild_id] = 0
+        self.cog.pause_votes[guild_id] = set()
         self.cog.skip_votes[guild_id] = set()
         self.cog.stop_votes[guild_id] = set()
         await interaction.response.send_message("⏹️ Stopped and queue cleared")
+
+    def _votes_needed(self, vc: discord.VoiceClient) -> int:
+        # Dynamic threshold so vote still works in small channels.
+        non_bot_members = [m for m in vc.channel.members if not m.bot]
+        member_count = len(non_bot_members)
+
+        if member_count <= 1:
+            return 1
+        if member_count <= 4:
+            return 2
+        return 3
 
     @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="music_queue")
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:

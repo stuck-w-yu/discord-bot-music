@@ -819,6 +819,44 @@ class Music(commands.Cog):
             ctx.voice_client.stop()
             await ctx.send("⏭️ Skipped song.")
 
+    @commands.command(name='remove', aliases=['r', 'rm'])
+    @ensure_voice()
+    async def remove_from_queue(self, ctx: commands.Context, *, target: str) -> None:
+        """Remove queue item(s). Supports compatibility syntax like `!r cl 10`."""
+        guild_id = ctx.guild.id
+        if guild_id not in self.queues or not self.queues[guild_id]:
+            return await ctx.send("Queue is empty.")
+
+        tokens = target.strip().split()
+        if not tokens:
+            return await ctx.send("Usage: `!remove <index>` or `!remove clear [index]`.")
+
+        first = tokens[0].lower()
+
+        if first in {'cl', 'clear', 'clean'}:
+            if len(tokens) == 1:
+                removed_count = len(self.queues[guild_id])
+                self.queues[guild_id] = []
+                self.save_queues()
+                return await ctx.send(f"🧹 Cleared queue ({removed_count} song(s)).")
+
+            if not tokens[1].isdigit():
+                return await ctx.send("Invalid index. Use a number after `clear`.")
+
+            index = int(tokens[1])
+        else:
+            if not first.isdigit():
+                return await ctx.send("Invalid syntax. Use `!remove <index>` or `!remove clear [index]`.")
+            index = int(first)
+
+        queue = self.queues[guild_id]
+        if index < 1 or index > len(queue):
+            return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(queue)}.")
+
+        removed = queue.pop(index - 1)
+        self.save_queues()
+        await ctx.send(f"🗑️ Removed from queue: **{removed.get('title', 'Unknown Title')}**")
+
     @commands.command(name='volume', aliases=['v', 'vol'])
     @ensure_voice()
     async def volume(self, ctx: commands.Context, volume: int) -> None:

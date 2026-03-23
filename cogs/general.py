@@ -142,6 +142,7 @@ class General(commands.Cog):
             "`!resume (res)` - Lanjut lagu\n"
             "`!nowplaying (np)` - Lagu yang sedang diputar\n"
             "`!skip (s) [index]` - Lewati lagu (opsional: ke urutan tertentu)\n"
+            "`!remove (r) <index|clear [index]>` - Hapus lagu dari queue\n"
             "`!stop (st)` - Stop & bersihkan queue\n"
             "`!queue (q)` - Lihat antrian\n"
             "`!loop (lp)` - Mode Loop\n"

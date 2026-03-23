@@ -48,6 +48,12 @@ class MusicBot(commands.Bot):
 
         if isinstance(error, commands.CommandNotFound):
             print(f"[ERROR] User: {user} | Command: {content} | Error: Command not found")
+            normalized = content.lower().strip()
+            if normalized.startswith(("!r cl", "!r clear", "!r remove")):
+                await ctx.send(
+                    "Perintah itu tidak tersedia di bot ini. "
+                    "Gunakan `!remove <index>` atau `!remove clear [index]` untuk hapus dari antrean."
+                )
 
         elif isinstance(error, commands.MissingRequiredArgument):
             print(f"[ERROR] User: {user} | Command: {command} | Error: Missing argument {error.param}")
@@ -64,7 +70,13 @@ class MusicBot(commands.Bot):
         elif isinstance(error, commands.CommandInvokeError):
             original = error.original
             if "ClientConnectorDNSError" in str(original):
-                 await ctx.send("⚠️ **Network Error**: Could not connect to Discord voice servers. This is likely a DNS issue. Please try:\n1. Restarting the bot.\n2. Checking your internet connection.\n3. Flushing your DNS (`ipconfig /flushdns`).")
+                 await ctx.send(
+                     "⚠️ **Network Error**: Could not connect to Discord voice servers (temporary DNS issue).\n"
+                     "Please try:\n"
+                     "1. Restarting the bot/container.\n"
+                     "2. Checking server internet and DNS resolver.\n"
+                     "3. Waiting a few minutes; auto-retry is enabled."
+                 )
                  print(f"[CRITICAL] User: {user} | Command: {command} | DNS Error: {original}")
             else:
                 await ctx.send(f"⚠️ An error occurred: {original}")

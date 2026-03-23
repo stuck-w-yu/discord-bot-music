@@ -598,6 +598,49 @@ class MusicLavalink(commands.Cog):
         await player.skip()
         await ctx.send("⏭️ Skipped song.")
 
+    @commands.command(name="remove", aliases=["r", "rm"])
+    @ensure_voice()
+    async def remove_from_queue(self, ctx: commands.Context, *, target: str) -> None:
+        """Remove queue item(s). Supports compatibility syntax like `!r cl 10`."""
+        player = ctx.voice_client
+        if not isinstance(player, wavelink.Player):
+            return await ctx.send("Queue is empty.")
+
+        queue_items = list(player.queue)
+        if not queue_items:
+            return await ctx.send("Queue is empty.")
+
+        tokens = target.strip().split()
+        if not tokens:
+            return await ctx.send("Usage: `!remove <index>` or `!remove clear [index]`.")
+
+        first = tokens[0].lower()
+
+        if first in {"cl", "clear", "clean"}:
+            if len(tokens) == 1:
+                removed_count = len(queue_items)
+                player.queue.clear()
+                return await ctx.send(f"🧹 Cleared queue ({removed_count} song(s)).")
+
+            if not tokens[1].isdigit():
+                return await ctx.send("Invalid index. Use a number after `clear`.")
+
+            index = int(tokens[1])
+        else:
+            if not first.isdigit():
+                return await ctx.send("Invalid syntax. Use `!remove <index>` or `!remove clear [index]`.")
+            index = int(first)
+
+        if index < 1 or index > len(queue_items):
+            return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(queue_items)}.")
+
+        removed = queue_items.pop(index - 1)
+        player.queue.clear()
+        for item in queue_items:
+            await player.queue.put_wait(item)
+
+        await ctx.send(f"🗑️ Removed from queue: **{removed.title}**")
+
     @commands.command(name="queue", aliases=["q"])
     @ensure_voice()
     async def queue(self, ctx: commands.Context) -> None:

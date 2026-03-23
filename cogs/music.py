@@ -857,6 +857,18 @@ class Music(commands.Cog):
         self.save_queues()
         await ctx.send(f"🗑️ Removed from queue: **{removed.get('title', 'Unknown Title')}**")
 
+    @commands.command(name='clear', aliases=['cq', 'clearqueue'])
+    @ensure_voice()
+    async def clear_queue(self, ctx: commands.Context) -> None:
+        guild_id = ctx.guild.id
+        if guild_id not in self.queues or not self.queues[guild_id]:
+            return await ctx.send("Queue is already empty.")
+
+        removed_count = len(self.queues[guild_id])
+        self.queues[guild_id] = []
+        self.save_queues()
+        await ctx.send(f"🧹 Cleared queue ({removed_count} song(s)).")
+
     @commands.command(name='volume', aliases=['v', 'vol'])
     @ensure_voice()
     async def volume(self, ctx: commands.Context, volume: int) -> None:

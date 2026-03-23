@@ -84,6 +84,7 @@ If you prefer using just the `Dockerfile`:
 - `!nowplaying` (np) - Show current song and progress
 - `!skip <index>` (s) - Skip current song (or skip to specific queue number)
 - `!remove <index|clear [index]>` (r, rm) - Remove song from queue / compatibility for old `!r cl <index>` style
+- `!clear` (cq, clearqueue) - Clear all songs in queue quickly
 - `!stop` (st) - Stop playback and clear queue
 - `!queue` (q) - Show current queue
 - `!loop` (lp) - Toggle loop mode (Off -> Current -> Queue)

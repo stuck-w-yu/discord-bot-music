@@ -641,6 +641,21 @@ class MusicLavalink(commands.Cog):
 
         await ctx.send(f"🗑️ Removed from queue: **{removed.title}**")
 
+    @commands.command(name="clear", aliases=["cq", "clearqueue"])
+    @ensure_voice()
+    async def clear_queue(self, ctx: commands.Context) -> None:
+        player = ctx.voice_client
+        if not isinstance(player, wavelink.Player):
+            return await ctx.send("Queue is already empty.")
+
+        queue_items = list(player.queue)
+        if not queue_items:
+            return await ctx.send("Queue is already empty.")
+
+        removed_count = len(queue_items)
+        player.queue.clear()
+        await ctx.send(f"🧹 Cleared queue ({removed_count} song(s)).")
+
     @commands.command(name="queue", aliases=["q"])
     @ensure_voice()
     async def queue(self, ctx: commands.Context) -> None:

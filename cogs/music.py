@@ -120,7 +120,14 @@ class Music(commands.Cog):
             print("⚠️ cookies.txt not found. YouTube may restrict playback.")
 
         self.ffmpeg_options: Dict[str, str] = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'before_options': (
+                '-reconnect 1 '
+                '-reconnect_streamed 1 '
+                '-reconnect_at_eof 1 '
+                '-reconnect_on_network_error 1 '
+                '-reconnect_delay_max 5 '
+                '-rw_timeout 15000000'
+            ),
             'options': '-vn -probesize 32 -analyzeduration 0 -bufsize 64k',
         }
         self.ytdl = yt_dlp.YoutubeDL(self.yt_dlp_options)
@@ -177,7 +184,10 @@ class Music(commands.Cog):
          # Resumes execution with the current song / queue if possible
          guild_id = guild.id
          if guild_id in self.current_song and self.current_song[guild_id]:
-             entry = self.current_song[guild_id]
+             entry = cast(Dict[str, Any], self.current_song[guild_id])
+             refreshed_stream = await self._refresh_stream_url(entry)
+             if refreshed_stream:
+                 entry['stream_url'] = refreshed_stream
              source = discord.FFmpegPCMAudio(
                  entry['stream_url'],
                  before_options=self.ffmpeg_options['before_options'],
@@ -185,7 +195,33 @@ class Music(commands.Cog):
              )
              source = discord.PCMVolumeTransformer(source)
              source.volume = self.volumes.get(guild_id, 0.5)
-             vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next_internal(guild_id, vc), self.bot.loop))
+             vc.play(source, after=self._make_after_play(guild_id, vc, None))
+
+    async def _refresh_stream_url(self, entry: Dict[str, Any]) -> Optional[str]:
+        """Refresh potentially expired stream URL from original track URL."""
+        original_url = entry.get('url')
+        if not original_url:
+            return entry.get('stream_url')
+
+        data = await self._extract_info_async(original_url)
+        if isinstance(data, dict):
+            refreshed = data.get('url')
+            if isinstance(refreshed, str) and refreshed.strip():
+                return refreshed
+        return entry.get('stream_url')
+
+    def _make_after_play(
+        self,
+        guild_id: int,
+        vc: Optional[discord.VoiceProtocol],
+        ctx: Optional[commands.Context],
+    ):
+        def _after_play(err: Optional[Exception]) -> None:
+            if err:
+                print(f"FFmpeg playback error on guild {guild_id}: {err}")
+            asyncio.run_coroutine_threadsafe(self.play_next_internal(guild_id, vc, ctx), self.bot.loop)
+
+        return _after_play
 
     async def play_next(self, ctx: commands.Context) -> None:
         await self.play_next_internal(ctx.guild.id, ctx.voice_client, ctx)
@@ -217,7 +253,9 @@ class Music(commands.Cog):
         
         try:
             # FIX REDUNDANT EXTRACTION: We already have stream_url inside entry
-            filename = entry['stream_url']
+            refreshed_stream = await self._refresh_stream_url(entry)
+            filename = refreshed_stream or entry['stream_url']
+            entry['stream_url'] = filename
             
             self.current_song[guild_id] = entry
             self.start_times[guild_id] = time.time()
@@ -236,7 +274,7 @@ class Music(commands.Cog):
             source.volume = self.volumes.get(guild_id, 0.5)
 
             if vc and vc.is_connected():
-                 vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next_internal(guild_id, vc, ctx), self.bot.loop))
+                 vc.play(source, after=self._make_after_play(guild_id, vc, ctx))
                  
                  if ctx or guild_id in self.last_channel:
                      channel = ctx.channel if ctx else self.bot.get_channel(self.last_channel[guild_id])

@@ -3,6 +3,8 @@ from discord.ext import commands
 import os
 import asyncio
 import traceback
+import socket
+import aiohttp
 import static_ffmpeg
 from dotenv import load_dotenv
 
@@ -75,13 +77,40 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 
-if __name__ == "__main__":
+async def run_bot_with_retry() -> None:
     if not TOKEN or TOKEN == "your_token_here":
         print("ERROR: Please set your DISCORD_TOKEN in the .env file.")
-    else:
+        return
+
+    attempt = 0
+    while True:
         try:
-            bot.run(TOKEN)
+            await bot.start(TOKEN)
+            break
+        except discord.LoginFailure:
+            print("ERROR: Invalid DISCORD_TOKEN. Please check your .env file.")
+            break
+        except (aiohttp.ClientConnectorError, socket.gaierror, asyncio.TimeoutError) as e:
+            attempt += 1
+            backoff = min(300, 5 * (2 ** min(attempt, 6)))
+            print(
+                f"Network/DNS error while connecting to Discord (attempt {attempt}): {e}. "
+                f"Retrying in {backoff}s..."
+            )
+            await asyncio.sleep(backoff)
         except KeyboardInterrupt:
             print("Bot shutdown initiated gracefully...")
+            break
         except Exception as e:
-            print(f"Fatal error: {e}")
+            attempt += 1
+            backoff = min(120, 5 * (2 ** min(attempt, 4)))
+            print(f"Fatal startup error (attempt {attempt}): {e}. Retrying in {backoff}s...")
+            traceback.print_exception(type(e), e, e.__traceback__)
+            await asyncio.sleep(backoff)
+        finally:
+            if not bot.is_closed():
+                await bot.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(run_bot_with_retry())

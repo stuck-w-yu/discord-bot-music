@@ -64,6 +64,19 @@ To ensure data persistence across restarts, use Docker Compose:
 
 Compose di repository ini sudah menyertakan service `lavalink`, jadi cukup `docker-compose up -d` untuk menjalankan bot + lavalink sekaligus.
 
+### DNS Stability Tips (Docker)
+Jika sesekali muncul error `Temporary failure in name resolution` atau `Cannot connect to host ...discord.gg`, lakukan langkah berikut:
+1. Restart service:
+   ```bash
+   docker-compose restart bot
+   ```
+2. Recreate containers (agar resolver ikut terset ulang):
+   ```bash
+   docker-compose down
+   docker-compose up -d
+   ```
+3. Compose di repo ini sudah diset DNS publik (`1.1.1.1` dan `8.8.8.8`) untuk membantu stabilitas resolver.
+
 ## Deploying on Coolify (Dockerfile Only)
 If you prefer using just the `Dockerfile`:
 

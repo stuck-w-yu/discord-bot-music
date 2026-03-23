@@ -4,6 +4,9 @@ services:
   lavalink:
     image: ghcr.io/lavalink-devs/lavalink:4
     restart: always
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     environment:
       - _JAVA_OPTIONS=-Xmx512m
       - SERVER_PORT=2333
@@ -16,6 +19,9 @@ services:
     restart: always
     depends_on:
       - lavalink
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./data:/app/data
     env_file:

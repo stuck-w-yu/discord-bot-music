@@ -315,7 +315,8 @@ class Music(commands.Cog):
     @ensure_voice()
     async def play_leave(self, ctx: commands.Context) -> None:
         if ctx.voice_client:
-            await ctx.voice_client.disconnect(force=False)
+            # Force disconnect to ensure underlying voice/ffmpeg resources are torn down.
+            await ctx.voice_client.disconnect(force=True)
             if ctx.guild.id in self.queues:
                 del self.queues[ctx.guild.id]
                 self.save_queues()

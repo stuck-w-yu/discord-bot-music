@@ -69,7 +69,13 @@ class MusicBot(commands.Bot):
 
         elif isinstance(error, commands.CommandInvokeError):
             original = error.original
-            if "ClientConnectorDNSError" in str(original):
+            network_markers = (
+                "ClientConnectorDNSError",
+                "Temporary failure in name resolution",
+                "socket.gaierror",
+                "Cannot connect to host",
+            )
+            if any(marker in str(original) for marker in network_markers):
                  await ctx.send(
                      "⚠️ **Network Error**: Could not connect to Discord voice servers (temporary DNS issue).\n"
                      "Please try:\n"

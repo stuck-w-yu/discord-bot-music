@@ -19,6 +19,15 @@ If you are deploying on Coolify or Docker, you can use an Environment Variable i
     -   **Value**: (Paste the entire content of your `cookies.txt` file here)
 4.  Redeploy/Restart the bot.
 
+Alternative (recommended for Docker): set file path env instead of full content.
+- `YOUTUBE_COOKIES_FILE=/app/data/cookies.txt`
+- Bot juga mendukung fallback key: `COOKIE_FILE` atau `YTDLP_COOKIEFILE`
+
+Catatan format `YOUTUBE_COOKIES`:
+- Bisa isi plain text cookies langsung.
+- Bisa isi escaped newlines (`\n`) dari single-line `.env`.
+- Bisa isi base64 dengan format `base64:<encoded_cookie_content>`.
+
 ## 🛠️ Usage
 - 🎵 High-quality music playback from YouTube & Spotify (metadata search)
 - ⏯️ Music controls (Play, Pause, Skip, Stop, Queue)

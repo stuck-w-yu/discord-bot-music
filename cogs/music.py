@@ -13,6 +13,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
+import base64
 from typing import Optional, Dict, List, Any, Set, cast, Union
 
 def _votes_needed(vc: discord.VoiceProtocol) -> int:
@@ -102,15 +103,48 @@ class Music(commands.Cog):
         data_dir = os.getenv('DATA_DIR', 'data')
         self.queue_file = os.path.join(data_dir, 'queues.json')
         data_cookie_path = os.path.join(data_dir, 'cookies.txt')
-        
-        if os.getenv('YOUTUBE_COOKIES'):
-            os.makedirs(data_dir, exist_ok=True)
-            youtube_cookies = os.getenv('YOUTUBE_COOKIES', '')
-            with open(data_cookie_path, 'w') as f:
-                f.write(youtube_cookies)
-            print(f"🍪 Created {data_cookie_path} from Environment Variable")
 
-        if os.path.exists(data_cookie_path):
+        cookie_file_env = (
+            os.getenv('YOUTUBE_COOKIES_FILE')
+            or os.getenv('COOKIE_FILE')
+            or os.getenv('YTDLP_COOKIEFILE')
+        )
+        youtube_cookies = os.getenv('YOUTUBE_COOKIES', '')
+        resolved_cookie_file: Optional[str] = None
+
+        if cookie_file_env and os.path.exists(cookie_file_env):
+            resolved_cookie_file = cookie_file_env
+            print(f"🍪 Loaded cookie file from env path: {cookie_file_env}")
+        elif youtube_cookies and os.path.exists(youtube_cookies):
+            resolved_cookie_file = youtube_cookies
+            print(f"🍪 Loaded cookie file from YOUTUBE_COOKIES path: {youtube_cookies}")
+        elif youtube_cookies:
+            os.makedirs(data_dir, exist_ok=True)
+            cookie_text = youtube_cookies
+
+            # Handle escaped newline format from .env single-line values.
+            if "\\n" in cookie_text:
+                cookie_text = cookie_text.replace("\\n", "\n")
+
+            # Optional base64 format: YOUTUBE_COOKIES=base64:<encoded_content>
+            if cookie_text.startswith('base64:'):
+                try:
+                    encoded = cookie_text.split(':', 1)[1].strip()
+                    cookie_text = base64.b64decode(encoded).decode('utf-8', errors='ignore')
+                except Exception as e:
+                    print(f"⚠️ Failed to decode base64 cookies from env: {e}")
+                    cookie_text = ''
+
+            if cookie_text:
+                with open(data_cookie_path, 'w') as f:
+                    f.write(cookie_text)
+                resolved_cookie_file = data_cookie_path
+                print(f"🍪 Created {data_cookie_path} from environment variable content")
+
+        if resolved_cookie_file and os.path.exists(resolved_cookie_file):
+            self.yt_dlp_options['cookiefile'] = resolved_cookie_file
+            print(f"🍪 Authentication cookie active: {resolved_cookie_file}")
+        elif os.path.exists(data_cookie_path):
             self.yt_dlp_options['cookiefile'] = data_cookie_path
             print(f"🍪 Loaded {data_cookie_path} for authentication")
         elif os.path.exists('cookies.txt'):

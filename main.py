@@ -9,6 +9,7 @@ import static_ffmpeg
 from dotenv import load_dotenv
 
 load_dotenv()
+load_dotenv(dotenv_path='environment/.env', override=False)
 static_ffmpeg.add_paths()
 
 TOKEN = os.getenv('DISCORD_TOKEN')

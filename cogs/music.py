@@ -110,20 +110,20 @@ class Music(commands.Cog):
             or os.getenv('COOKIE_FILE')
             or os.getenv('YTDLP_COOKIEFILE')
         )
-        youtube_cookies = os.getenv('YOUTUBE_COOKIES', '')
+        youtube_cookies_raw = os.getenv('YOUTUBE_COOKIES', '')
+        env_only_cookies = os.getenv('YOUTUBE_COOKIES_ONLY', 'false').lower() == 'true'
         resolved_cookie_file: Optional[str] = None
 
-        if cookie_file_env and os.path.exists(cookie_file_env):
-            resolved_cookie_file = cookie_file_env
-            print(f"🍪 Loaded cookie file from env path: {cookie_file_env}")
-        elif youtube_cookies and os.path.exists(youtube_cookies):
-            resolved_cookie_file = youtube_cookies
-            print(f"🍪 Loaded cookie file from YOUTUBE_COOKIES path: {youtube_cookies}")
-        elif youtube_cookies:
+        # Prefer cookie content from env so deployment can be fully env-driven.
+        if youtube_cookies_raw:
             os.makedirs(data_dir, exist_ok=True)
-            cookie_text = youtube_cookies
+            cookie_text = youtube_cookies_raw.strip()
 
-            # Handle escaped newline format from .env single-line values.
+            # Handle wrapped quotes commonly produced by some env UIs.
+            if len(cookie_text) >= 2 and cookie_text[0] == cookie_text[-1] and cookie_text[0] in ("'", '"'):
+                cookie_text = cookie_text[1:-1]
+
+            # Handle escaped newline format from single-line env values.
             if "\\n" in cookie_text:
                 cookie_text = cookie_text.replace("\\n", "\n")
 
@@ -140,12 +140,21 @@ class Music(commands.Cog):
                 with open(data_cookie_path, 'w') as f:
                     f.write(cookie_text)
                 resolved_cookie_file = data_cookie_path
-                print(f"🍪 Created {data_cookie_path} from environment variable content")
+                print(f"🍪 Created {data_cookie_path} from YOUTUBE_COOKIES environment content")
+            else:
+                print("⚠️ YOUTUBE_COOKIES is set but empty/invalid after parsing.")
+        elif cookie_file_env and os.path.exists(cookie_file_env):
+            resolved_cookie_file = cookie_file_env
+            print(f"🍪 Loaded cookie file from env path: {cookie_file_env}")
+        elif cookie_file_env:
+            print(f"⚠️ Cookie file path from env not found: {cookie_file_env}")
 
         if resolved_cookie_file and os.path.exists(resolved_cookie_file):
             self.yt_dlp_options['cookiefile'] = resolved_cookie_file
             self.youtube_auth_ready = True
             print(f"🍪 Authentication cookie active: {resolved_cookie_file}")
+        elif env_only_cookies:
+            print("⚠️ YOUTUBE_COOKIES_ONLY=true but no valid YOUTUBE_COOKIES was found. Playback auth disabled.")
         elif os.path.exists(data_cookie_path):
             self.yt_dlp_options['cookiefile'] = data_cookie_path
             self.youtube_auth_ready = True
@@ -155,7 +164,7 @@ class Music(commands.Cog):
             self.youtube_auth_ready = True
             print("🍪 Loaded local cookies.txt for authentication")
         else:
-            print("⚠️ cookies.txt not found. YouTube may restrict playback.")
+            print("⚠️ No YouTube cookies found from env or file. YouTube may restrict playback.")
 
         self.ffmpeg_options: Dict[str, str] = {
             'before_options': (

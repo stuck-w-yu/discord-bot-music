@@ -403,8 +403,32 @@ class Music(commands.Cog):
 
     async def _extract_info_async(self, query: str) -> Optional[Dict[str, Any]]:
         loop = asyncio.get_event_loop()
+
+        def _extract_with_fallback() -> Optional[Dict[str, Any]]:
+            try:
+                return self.ytdl.extract_info(query, download=False)
+            except Exception as primary_error:
+                message = str(primary_error)
+                # Some videos/playlists expose no matching stream for strict format selectors.
+                # Retry with relaxed options so search/metadata flow does not fail hard.
+                if 'Requested format is not available' in message:
+                    try:
+                        fallback_opts = dict(self.yt_dlp_options)
+                        fallback_opts.pop('format', None)
+                        fallback_opts.pop('extractaudio', None)
+                        fallback_opts.pop('audioformat', None)
+                        fallback_opts['skip_download'] = True
+                        with yt_dlp.YoutubeDL(fallback_opts) as fallback_ytdl:
+                            return fallback_ytdl.extract_info(query, download=False)
+                    except Exception as fallback_error:
+                        print(f"Fallback extract failed for {query}: {fallback_error}")
+                        return None
+
+                print(f"Failed to extract info for {query}: {primary_error}")
+                return None
+
         try:
-            return await loop.run_in_executor(None, lambda: self.ytdl.extract_info(query, download=False))
+            return await loop.run_in_executor(None, _extract_with_fallback)
         except Exception as e:
             print(f"Failed to extract info for {query}: {e}")
             return None

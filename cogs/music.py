@@ -82,6 +82,7 @@ class Music(commands.Cog):
         self.pause_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
         self.skip_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
         self.stop_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
+        self.youtube_auth_ready: bool = False
         self.yt_dlp_options: Dict[str, Any] = {
             'format': 'bestaudio/best',
             'extractaudio': True,
@@ -143,12 +144,15 @@ class Music(commands.Cog):
 
         if resolved_cookie_file and os.path.exists(resolved_cookie_file):
             self.yt_dlp_options['cookiefile'] = resolved_cookie_file
+            self.youtube_auth_ready = True
             print(f"🍪 Authentication cookie active: {resolved_cookie_file}")
         elif os.path.exists(data_cookie_path):
             self.yt_dlp_options['cookiefile'] = data_cookie_path
+            self.youtube_auth_ready = True
             print(f"🍪 Loaded {data_cookie_path} for authentication")
         elif os.path.exists('cookies.txt'):
             self.yt_dlp_options['cookiefile'] = 'cookies.txt'
+            self.youtube_auth_ready = True
             print("🍪 Loaded local cookies.txt for authentication")
         else:
             print("⚠️ cookies.txt not found. YouTube may restrict playback.")
@@ -573,6 +577,13 @@ class Music(commands.Cog):
     @commands.command(name='play', aliases=['p'])
     @ensure_voice()
     async def play(self, ctx: commands.Context, *, query: str) -> None:
+        if not self.youtube_auth_ready:
+            return await ctx.send(
+                "⚠️ **Playback Unavailable**\n"
+                "The bot is running in legacy mode and requires YouTube authentication, but no valid cookie file was found.\n"
+                "Please configure `YOUTUBE_COOKIES` or `cookies.txt` to enable playback."
+            )
+            
         self.last_channel[ctx.guild.id] = ctx.channel.id
         if not ctx.voice_client:
             try:
@@ -1019,7 +1030,7 @@ class MusicPlayerView(discord.ui.View):
         guild_id = self.ctx.guild.id
         current = self.cog.current_song.get(guild_id)
         
-        can_skip = interaction.user.guild_permissions.administrator
+        can_skip = interaction.user.guild.permissions.administrator
             
         if not can_skip:
             if guild_id not in self.cog.skip_votes:
@@ -1055,7 +1066,7 @@ class MusicPlayerView(discord.ui.View):
         guild_id = self.ctx.guild.id
         current = self.cog.current_song.get(guild_id)
         
-        can_stop = interaction.user.guild_permissions.administrator
+        can_stop = interaction.user.guild.permissions.administrator
             
         if not can_stop:
             if guild_id not in self.cog.stop_votes:

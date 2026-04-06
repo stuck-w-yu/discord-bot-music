@@ -1,103 +1,99 @@
 # Discord Music Bot
 
-A feature-rich Discord bot for playing music.
+A feature-rich Discord bot for playing music, with support for both legacy `yt-dlp` and modern Lavalink playback.
 
-## 🍪 Fixing YouTube Sign-in Errors
-If you see errors like `Sign in to confirm you’re not a bot`, you need to provide a `cookies.txt` file.
-1.  Install a browser extension to export cookies (e.g., "Get cookies.txt LOCALLY" for Chrome/Firefox).
-2.  Go to YouTube and make sure you are logged in.
-3.  Use the extension to export your cookies as a file named `cookies.txt`.
-4.  Place `cookies.txt` in the same directory as `main.py`.
-5.  Restart the bot.
+## 🎶 Player Modes
 
-### ☁️ Deploying on Coolify / Docker
-If you are deploying on Coolify or Docker, you can use an Environment Variable instead of a file:
-1.  Open your project in Coolify.
-2.  Go to **Environment Variables**.
-3.  Add a new variable:
-    -   **Key**: `YOUTUBE_COOKIES`
-    -   **Value**: (Paste the entire content of your `cookies.txt` file here)
-4.  Redeploy/Restart the bot.
+This bot supports two different music playback modes:
 
-Alternative (recommended for Docker): set file path env instead of full content.
-- `YOUTUBE_COOKIES_FILE=/app/data/cookies.txt`
-- Bot juga mendukung fallback key: `COOKIE_FILE` atau `YTDLP_COOKIEFILE`
+1.  **Lavalink Mode (Default & Recommended)**
+    -   Uses a dedicated Lavalink server to handle music processing.
+    -   More stable, better performance, and avoids most YouTube rate-limiting/blocking issues.
+    -   Activated by default in the provided `docker-compose.yml`.
+    -   **Does NOT require YouTube cookies.**
 
-Catatan format `YOUTUBE_COOKIES`:
-- Bisa isi plain text cookies langsung.
-- Bisa isi escaped newlines (`\n`) dari single-line `.env`.
-- Bisa isi base64 dengan format `base64:<encoded_cookie_content>`.
+2.  **Legacy Mode**
+    -   Uses `yt-dlp` and `FFmpeg` directly on the bot's machine.
+    -   Simpler setup for local testing but prone to YouTube errors (`Sign in to confirm you’re not a bot`).
+    -   **Requires YouTube cookies** to function reliably.
 
-## 🛠️ Usage
-- 🎵 High-quality music playback from YouTube & Spotify (metadata search)
-- ⏯️ Music controls (Play, Pause, Skip, Stop, Queue)
-- 🐳 Docker support for easy deployment
+---
 
-## Lavalink Mode (Recommended for Stability)
-Bot ini sekarang mendukung 2 mode music player:
-1. Legacy mode (`cogs/music.py`) - FFmpeg + yt-dlp langsung.
-2. Lavalink mode (`cogs/music_lavalink.py`) - playback diproses oleh Lavalink server.
+## 🛠️ Configuration
 
-Aktifkan Lavalink mode dengan env:
-- `USE_LAVALINK=true`
-- `LAVALINK_HOST=lavalink`
-- `LAVALINK_PORT=2333`
-- `LAVALINK_PASSWORD=youshallnotpass`
+### Environment Variables
 
-Catatan Spotify:
-- Spotify tidak di-stream langsung (DRM).
-- Bot membaca metadata lagu Spotify (judul + artis), lalu mencari sumber playable (YouTube) untuk diputar via Lavalink.
+Create a `.env` file in the root directory or set these in your deployment environment (e.g., Docker, Coolify).
 
-## Setup
-1. Clone the repository
-2. Create a `.env` file with your `DISCORD_TOKEN`
-3. Install dependencies: `pip install -r requirements.txt`
-4. Run the bot: `python main.py`
+| Variable                | Description                                                                    | Mode      |
+| ----------------------- | ------------------------------------------------------------------------------ | --------- |
+| `DISCORD_TOKEN`         | **Required.** Your Discord bot token.                                          | Both      |
+| `USE_LAVALINK`          | Set to `true` to enable Lavalink mode. Defaults to `false` (legacy).           | Both      |
+| `LAVALINK_HOST`         | Hostname for the Lavalink server.                                              | Lavalink  |
+| `LAVALINK_PORT`         | Port for the Lavalink server.                                                  | Lavalink  |
+| `LAVALINK_PASSWORD`     | Password for the Lavalink server.                                              | Lavalink  |
+| `SPOTIPY_CLIENT_ID`     | Optional. Your Spotify App Client ID for better Spotify metadata searching.    | Both      |
+| `SPOTIPY_CLIENT_SECRET` | Optional. Your Spotify App Client Secret.                                      | Both      |
+| `YOUTUBE_COOKIES`       | **Legacy Mode Only.** Content of your `cookies.txt` file to bypass YT errors.  | Legacy    |
+| `YOUTUBE_COOKIES_FILE`  | **Legacy Mode Only.** Alternative to `YOUTUBE_COOKIES`. Path to a cookie file. | Legacy    |
+| `DATA_DIR`              | Optional. Directory to store persistent data like queues. Defaults to `data`.  | Both      |
 
-## Docker Deployment (Recommended)
-To ensure data persistence across restarts, use Docker Compose:
+### 🍪 YouTube Cookies (Legacy Mode Only)
 
-1. Build and start the container:
-   ```bash
-   docker-compose up -d
-   ```
-2. View logs:
-   ```bash
-   docker-compose logs -f
-   ```
-3. Update the bot:
-   ```bash
-   docker-compose build --no-cache
-   docker-compose up -d
-   ```
+If you are running in **Legacy Mode** (`USE_LAVALINK=false`) and see errors like `Sign in to confirm you’re not a bot`, you must provide YouTube cookies.
 
-Compose di repository ini sudah menyertakan service `lavalink`, jadi cukup `docker-compose up -d` untuk menjalankan bot + lavalink sekaligus.
+**1. Using a `cookies.txt` file:**
+   - Install a browser extension to export cookies (e.g., "Get cookies.txt LOCALLY").
+   - Go to YouTube, log in, and export your cookies as `cookies.txt`.
+   - Place the file in the `data` directory (or the path specified by `DATA_DIR`).
 
-### DNS Stability Tips (Docker)
-Jika sesekali muncul error `Temporary failure in name resolution` atau `Cannot connect to host ...discord.gg`, lakukan langkah berikut:
-1. Restart service:
-   ```bash
-   docker-compose restart bot
-   ```
-2. Recreate containers (agar resolver ikut terset ulang):
-   ```bash
-   docker-compose down
-   docker-compose up -d
-   ```
-3. Compose di repo ini sudah diset DNS publik (`1.1.1.1` dan `8.8.8.8`) untuk membantu stabilitas resolver.
+**2. Using Environment Variables:**
+   - **`YOUTUBE_COOKIES`**: Paste the entire content of your `cookies.txt` file into this variable. It supports plain text, single-line escaped newlines (`\n`), or base64-encoded content (e.g., `base64:<encoded_content>`).
+   - **`YOUTUBE_COOKIES_FILE`**: Provide the full path to your cookie file (e.g., `/app/data/cookies.txt`). This is the recommended method for Docker/Coolify.
 
-## Deploying on Coolify (Dockerfile Only)
-If you prefer using just the `Dockerfile`:
+---
 
-1. Create a new resource -> **Git Repository**.
-2. Select this repository.
-3. **Build Pack**: Select **Dockerfile**.
-4. **CRITICAL**: Go to the **Storage** tab in Coolify.
-   - Add a new volume.
-   - **Volume Name**: `discord-bot-data` (or similar)
-   - **Destination Path**: `/app/data`
-   
-   *One-time setup: If you forgot this step and the bot restarts, runtime data will be lost.*
+## 🚀 Deployment
+
+### Docker Deployment (Recommended)
+
+The provided `docker-compose.yml` is the easiest way to deploy the bot. It starts both the bot and a Lavalink server.
+
+**By default, it runs in Lavalink Mode.**
+
+1.  **Build and start the containers:**
+    ```bash
+    docker-compose up -d
+    ```
+2.  **View logs:**
+    ```bash
+    docker-compose logs -f
+    ```
+3.  **Update the bot:**
+    ```bash
+    docker-compose build --no-cache
+    docker-compose up -d
+    ```
+
+The Compose file is pre-configured with a public DNS (`1.1.1.1`, `8.8.8.8`) to improve DNS stability and prevent `Temporary failure in name resolution` errors.
+
+### Local Setup (Legacy Mode)
+
+1.  Clone the repository.
+2.  Create a `.env` file with your `DISCORD_TOKEN`.
+3.  Install dependencies: `pip install -r requirements.txt`.
+4.  (Optional but Recommended) Provide YouTube cookies as described above.
+5.  Run the bot: `python main.py`.
+
+### Deploying on Coolify (Dockerfile)
+
+1.  Create a new resource -> **Git Repository**.
+2.  Select this repository.
+3.  **Build Pack**: Select **Dockerfile**.
+4.  Configure your environment variables as needed.
+5.  **CRITICAL (Storage)**: Go to the **Storage** tab.
+    -   Add a new volume.
+    -   **Destination Path**: `/app/data` (This ensures your queue and other data persist across restarts).
 
 ## Commands
 - `!play <song/url>` (p) - Play a song or playlist (YouTube/Spotify)

@@ -179,11 +179,18 @@ class Music(commands.Cog):
             self.sp = None
             print("Spotify credentials not found. Spotify support disabled.")
 
+        # Ensure data directory exists for queue persistence
+        if self.queue_file:
+            os.makedirs(os.path.dirname(self.queue_file), exist_ok=True)
+            
         # Load persistent queues
         self.load_queues()
 
     def save_queues(self) -> None:
         try:
+            # Ensure directory exists before writing
+            if self.queue_file:
+                os.makedirs(os.path.dirname(self.queue_file), exist_ok=True)
             with open(self.queue_file, 'w') as f:
                 json.dump(self.queues, f)
         except Exception as e:
@@ -784,7 +791,7 @@ class Music(commands.Cog):
         can_stop = False
         if current and current.get('requester_id') == ctx.author.id:
             can_stop = True
-        elif ctx.author.guild_permissions.administrator:
+        elif ctx.author.guild.permissions.administrator:
             can_stop = True
             
         if not can_stop:
@@ -837,7 +844,7 @@ class Music(commands.Cog):
         can_skip = False
         if current and current.get('requester_id') == ctx.author.id:
             can_skip = True
-        elif ctx.author.guild_permissions.administrator:
+        elif ctx.author.guild.permissions.administrator:
             can_skip = True
             
         if not can_skip:
@@ -997,7 +1004,7 @@ class MusicPlayerView(discord.ui.View):
             await interaction.response.send_message("▶️ Resumed", ephemeral=True)
         else:
             guild_id = self.ctx.guild.id
-            if interaction.user.guild_permissions.administrator:
+            if interaction.user.guild.permissions.administrator:
                 vc.pause()
                 self.cog.pause_votes[guild_id] = set()
                 await interaction.response.send_message("⏸️ Paused", ephemeral=True)

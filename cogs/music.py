@@ -433,6 +433,29 @@ class Music(commands.Cog):
             print(f"Failed to extract info for {query}: {e}")
             return None
 
+    async def _pick_playable_entry(self, entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Pick the first playable entry from search results.
+
+        Some ytsearch top results can fail with format-unavailable errors.
+        This method probes several candidates and returns one with a usable stream URL.
+        """
+        for candidate in entries[:5]:
+            stream_url = candidate.get('url')
+            if isinstance(stream_url, str) and stream_url.strip():
+                return candidate
+
+            candidate_url = candidate.get('webpage_url') or candidate.get('original_url') or candidate.get('url')
+            if not isinstance(candidate_url, str) or not candidate_url.strip():
+                continue
+
+            resolved = await self._extract_info_async(candidate_url)
+            if isinstance(resolved, dict):
+                resolved_stream = resolved.get('url')
+                if isinstance(resolved_stream, str) and resolved_stream.strip():
+                    return resolved
+
+        return None
+
     def _spotify_track_url_from_query(self, query: str) -> Optional[str]:
         if "open.spotify.com/track/" in query:
             track_part = query.split("open.spotify.com/track/", 1)[1]
@@ -685,7 +708,11 @@ class Music(commands.Cog):
             first_query = tracks_to_search[0]
             data = await self._extract_info_async(f"ytsearch:{first_query}")
             if data and 'entries' in data and data['entries']:
-                track_data = data['entries'][0]
+                candidate_entries = [e for e in data['entries'] if isinstance(e, dict)]
+                track_data = await self._pick_playable_entry(candidate_entries)
+                if not track_data:
+                    return await ctx.send(f"Could not find a playable YouTube result for **{first_query}**.")
+
                 entry = {
                     'url': track_data.get('webpage_url'),
                     'stream_url': track_data.get('url'),
@@ -716,7 +743,11 @@ class Music(commands.Cog):
                     async with sem:
                         res = await self._extract_info_async(f"ytsearch:{search_query}")
                         if res and 'entries' in res and res['entries']:
-                            t_data = res['entries'][0]
+                            candidate_entries = [e for e in res['entries'] if isinstance(e, dict)]
+                            t_data = await self._pick_playable_entry(candidate_entries)
+                            if not t_data:
+                                return
+
                             t_entry = {
                                 'url': t_data.get('webpage_url'),
                                 'stream_url': t_data.get('url'),
@@ -751,7 +782,9 @@ class Music(commands.Cog):
                 tracks_to_add = data['entries']
                 await ctx.send(f"Found playlist with {len(tracks_to_add)} songs.")
             else:
-                tracks_to_add = [data['entries'][0]]
+                candidate_entries = [e for e in data['entries'] if isinstance(e, dict)]
+                chosen = await self._pick_playable_entry(candidate_entries)
+                tracks_to_add = [chosen] if chosen else []
         else:
             tracks_to_add = [data]
 

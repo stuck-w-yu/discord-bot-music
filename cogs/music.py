@@ -175,6 +175,17 @@ class Music(commands.Cog):
                         print(f"⚠️ Failed writing cookies to {target_path}: {write_error}")
         else:
             print("⚠️ cookies.txt not found. YouTube may restrict playback.")
+            checked_paths = [
+                data_cookie_path,
+                local_data_cookie_path,
+                os.path.abspath('cookies.txt'),
+                local_root_cookie_path,
+                cookie_file_env or '(env path not set)',
+            ]
+            print(f"Cookie lookup cwd: {os.getcwd()}")
+            print("Cookie paths checked:")
+            for p in checked_paths:
+                print(f" - {p}")
 
         self.ffmpeg_options: Dict[str, str] = {
             'before_options': (

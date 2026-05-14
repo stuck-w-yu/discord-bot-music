@@ -16,6 +16,28 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
 SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
 
+
+def _cookies_configured() -> bool:
+    data_dir = os.getenv('DATA_DIR', 'data')
+    data_cookie_path = os.path.join(data_dir, 'cookies.txt')
+
+    cookie_file_env = (
+        os.getenv('YOUTUBE_COOKIES_FILE')
+        or os.getenv('COOKIE_FILE')
+        or os.getenv('YTDLP_COOKIEFILE')
+    )
+    youtube_cookies = os.getenv('YOUTUBE_COOKIES', '').strip()
+
+    if os.path.exists(data_cookie_path):
+        return True
+    if os.path.exists('cookies.txt'):
+        return True
+    if cookie_file_env and os.path.exists(cookie_file_env):
+        return True
+    if youtube_cookies:
+        return True
+    return False
+
 class MusicBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -28,6 +50,14 @@ class MusicBot(commands.Bot):
 
     async def setup_hook(self):
         use_lavalink = os.getenv('USE_LAVALINK', 'false').lower() == 'true'
+        force_lavalink = os.getenv('FORCE_LAVALINK', 'false').lower() == 'true'
+
+        # Lavalink does not use yt-dlp cookiefile; prefer legacy when cookies are configured.
+        if use_lavalink and _cookies_configured() and not force_lavalink:
+            use_lavalink = False
+            print('YouTube cookies detected. Switching to legacy music cog so cookies are used.')
+            print('Set FORCE_LAVALINK=true to keep Lavalink mode and ignore cookies.')
+
         if use_lavalink:
             await self.load_extension('cogs.music_lavalink')
             print('Loaded Lavalink music cog (cogs.music_lavalink).')

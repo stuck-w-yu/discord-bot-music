@@ -29,6 +29,7 @@ Create a `.env` file in the root directory or set these in your deployment envir
 | ----------------------- | ------------------------------------------------------------------------------ | --------- |
 | `DISCORD_TOKEN`         | **Required.** Your Discord bot token.                                          | Both      |
 | `USE_LAVALINK`          | Set to `true` to enable Lavalink mode. Defaults to `false` (legacy).           | Both      |
+| `FORCE_LAVALINK`        | Optional. Set `true` to force Lavalink even when YouTube cookies are detected.  | Both      |
 | `LAVALINK_HOST`         | Hostname for the Lavalink server.                                              | Lavalink  |
 | `LAVALINK_PORT`         | Port for the Lavalink server.                                                  | Lavalink  |
 | `LAVALINK_PASSWORD`     | Password for the Lavalink server.                                              | Lavalink  |
@@ -39,6 +40,8 @@ Create a `.env` file in the root directory or set these in your deployment envir
 | `DATA_DIR`              | Optional. Directory to store persistent data like queues. Defaults to `data`.  | Both      |
 
 ### 🍪 YouTube Cookies (Legacy Mode Only)
+
+If cookies are detected (`data/cookies.txt`, `cookies.txt`, `YOUTUBE_COOKIES_FILE`, or `YOUTUBE_COOKIES`), the bot will automatically switch from Lavalink mode to Legacy mode so cookies can be used. Set `FORCE_LAVALINK=true` to disable this auto-switch.
 
 If you are running in **Legacy Mode** (`USE_LAVALINK=false`) and see errors like `Sign in to confirm you’re not a bot`, you must provide YouTube cookies.
 

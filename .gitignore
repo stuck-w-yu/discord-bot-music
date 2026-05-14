@@ -20,5 +20,4 @@ data/
 .vscode/
 .idea/
 
-# Secrets
-cookies.txt
+

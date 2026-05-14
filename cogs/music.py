@@ -801,9 +801,18 @@ class Music(commands.Cog):
 
         await ctx.send(f"Searching for **{query}**...")
         data = await self._extract_info_async(query)
+
+        # Some yt-dlp builds fail to resolve plain-text queries with default_search.
+        # Retry with explicit ytsearch to improve reliability for normal song titles.
+        is_url_like = re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', query) is not None or query.startswith('www.')
+        if not data and not query.startswith('ytsearch:') and not is_url_like:
+            data = await self._extract_info_async(f"ytsearch1:{query}")
         
         if not data:
-            return await ctx.send("An error occurred or no songs found.")
+            return await ctx.send(
+                "An error occurred or no songs found. "
+                "Try another keyword/title, or refresh YouTube cookies if this keeps happening."
+            )
 
         tracks_to_add = []
         if 'entries' in data:

@@ -20,6 +20,9 @@ SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
 def _cookies_configured() -> bool:
     data_dir = os.getenv('DATA_DIR', 'data')
     data_cookie_path = os.path.join(data_dir, 'cookies.txt')
+    project_root = os.path.abspath(os.path.dirname(__file__))
+    local_data_cookie_path = os.path.join(project_root, 'data', 'cookies.txt')
+    local_root_cookie_path = os.path.join(project_root, 'cookies.txt')
 
     cookie_file_env = (
         os.getenv('YOUTUBE_COOKIES_FILE')
@@ -30,7 +33,11 @@ def _cookies_configured() -> bool:
 
     if os.path.exists(data_cookie_path):
         return True
+    if os.path.exists(local_data_cookie_path):
+        return True
     if os.path.exists('cookies.txt'):
+        return True
+    if os.path.exists(local_root_cookie_path):
         return True
     if cookie_file_env and os.path.exists(cookie_file_env):
         return True

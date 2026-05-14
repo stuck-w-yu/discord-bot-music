@@ -104,6 +104,9 @@ class Music(commands.Cog):
         data_dir = os.getenv('DATA_DIR', 'data')
         self.queue_file = os.path.join(data_dir, 'queues.json')
         data_cookie_path = os.path.join(data_dir, 'cookies.txt')
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        local_data_cookie_path = os.path.join(project_root, 'data', 'cookies.txt')
+        local_root_cookie_path = os.path.join(project_root, 'cookies.txt')
 
         cookie_file_env = (
             os.getenv('YOUTUBE_COOKIES_FILE')
@@ -118,10 +121,18 @@ class Music(commands.Cog):
             self.yt_dlp_options['cookiefile'] = data_cookie_path
             self.youtube_auth_ready = True
             print(f"🍪 Loaded {data_cookie_path} for authentication")
+        elif os.path.exists(local_data_cookie_path):
+            self.yt_dlp_options['cookiefile'] = local_data_cookie_path
+            self.youtube_auth_ready = True
+            print(f"🍪 Loaded {local_data_cookie_path} for authentication")
         elif os.path.exists('cookies.txt'):
             self.yt_dlp_options['cookiefile'] = 'cookies.txt'
             self.youtube_auth_ready = True
             print("🍪 Loaded local cookies.txt for authentication")
+        elif os.path.exists(local_root_cookie_path):
+            self.yt_dlp_options['cookiefile'] = local_root_cookie_path
+            self.youtube_auth_ready = True
+            print(f"🍪 Loaded {local_root_cookie_path} for authentication")
         elif cookie_file_env and os.path.exists(cookie_file_env):
             resolved_cookie_file = cookie_file_env
             self.yt_dlp_options['cookiefile'] = resolved_cookie_file
@@ -150,11 +161,18 @@ class Music(commands.Cog):
                     cookie_text = ''
 
             if cookie_text:
-                with open(data_cookie_path, 'w') as f:
-                    f.write(cookie_text)
-                self.yt_dlp_options['cookiefile'] = data_cookie_path
-                self.youtube_auth_ready = True
-                print(f"🍪 Created {data_cookie_path} from environment variable content")
+                cookie_write_targets = [data_cookie_path, local_data_cookie_path]
+                for target_path in cookie_write_targets:
+                    try:
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        with open(target_path, 'w') as f:
+                            f.write(cookie_text)
+                        self.yt_dlp_options['cookiefile'] = target_path
+                        self.youtube_auth_ready = True
+                        print(f"🍪 Created {target_path} from environment variable content")
+                        break
+                    except Exception as write_error:
+                        print(f"⚠️ Failed writing cookies to {target_path}: {write_error}")
         else:
             print("⚠️ cookies.txt not found. YouTube may restrict playback.")
 

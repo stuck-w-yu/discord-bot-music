@@ -92,7 +92,7 @@ class Music(commands.Cog):
             'noplaylist': False, # Enable playlists
             'extract_flat': False, # Changed to False to get REAL streaming URLs on first pass
             'nocheckcertificate': True,
-            'ignoreerrors': False,
+            'ignoreerrors': True,
             'logtostderr': False,
             'quiet': True,
             'no_warnings': True,
@@ -434,6 +434,9 @@ class Music(commands.Cog):
         loop = asyncio.get_event_loop()
 
         def _extract_with_fallback() -> Optional[Dict[str, Any]]:
+            def _looks_like_url(value: str) -> bool:
+                return re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', value) is not None or value.startswith('www.')
+
             try:
                 return self.ytdl.extract_info(query, download=False)
             except Exception as primary_error:
@@ -447,8 +450,22 @@ class Music(commands.Cog):
                         fallback_opts.pop('extractaudio', None)
                         fallback_opts.pop('audioformat', None)
                         fallback_opts['skip_download'] = True
+                        fallback_opts['ignoreerrors'] = True
+                        fallback_opts['extractor_args'] = {
+                            'youtube': {
+                                'player_client': ['android', 'web', 'tv']
+                            }
+                        }
                         with yt_dlp.YoutubeDL(fallback_opts) as fallback_ytdl:
-                            return fallback_ytdl.extract_info(query, download=False)
+                            result = fallback_ytdl.extract_info(query, download=False)
+                            if result:
+                                return result
+
+                        # Extra fallback for plain-text search: use broader ytsearch so one broken
+                        # candidate does not cause complete failure.
+                        if not _looks_like_url(query) and not query.startswith('ytsearch:') and not query.startswith('ytsearch1:'):
+                            with yt_dlp.YoutubeDL(fallback_opts) as fallback_ytdl:
+                                return fallback_ytdl.extract_info(f"ytsearch5:{query}", download=False)
                     except Exception as fallback_error:
                         print(f"Fallback extract failed for {query}: {fallback_error}")
                         return None
@@ -470,12 +487,23 @@ class Music(commands.Cog):
         """
         for candidate in entries[:5]:
             stream_url = candidate.get('url')
-            if isinstance(stream_url, str) and stream_url.strip():
+            # Accept pre-resolved direct media URLs immediately.
+            if (
+                isinstance(stream_url, str)
+                and stream_url.strip()
+                and stream_url.startswith(('http://', 'https://'))
+                and 'youtube.com/watch' not in stream_url
+                and 'youtu.be/' not in stream_url
+            ):
                 return candidate
 
             candidate_url = candidate.get('webpage_url') or candidate.get('original_url') or candidate.get('url')
             if not isinstance(candidate_url, str) or not candidate_url.strip():
                 continue
+
+            # yt-dlp search fallback can return bare YouTube video IDs; normalize to watch URL.
+            if re.fullmatch(r'[A-Za-z0-9_-]{11}', candidate_url):
+                candidate_url = f"https://www.youtube.com/watch?v={candidate_url}"
 
             resolved = await self._extract_info_async(candidate_url)
             if isinstance(resolved, dict):

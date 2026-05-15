@@ -13,6 +13,8 @@ import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import wavelink
 
+from cogs.guild_state import GuildStateManager, GuildState
+
 
 def ensure_voice():
     async def predicate(ctx: commands.Context) -> bool:
@@ -30,13 +32,7 @@ def ensure_voice():
 class MusicLavalink(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.loops: Dict[int, int] = {}  # 0: off, 1: current, 2: all
-        self.current_song: Dict[int, Optional[wavelink.Playable]] = {}
-        self.skip_votes: Dict[int, Set[int]] = {}
-        self.stop_votes: Dict[int, Set[int]] = {}
-        self.volumes: Dict[int, int] = {}
-        self.last_np_msg: Dict[int, Optional[discord.Message]] = {}
-        self.last_channel: Dict[int, int] = {}
+        self.states = GuildStateManager()
         self.node_connected = False
 
         client_id = os.getenv("SPOTIPY_CLIENT_ID")
@@ -88,8 +84,8 @@ class MusicLavalink(commands.Cog):
 
         channel = ctx.author.voice.channel
         player = await channel.connect(cls=wavelink.Player, self_deaf=True)
-        self.volumes.setdefault(ctx.guild.id, 50)
-        await player.set_volume(self.volumes[ctx.guild.id])
+        state = self.states.get_or_create(ctx.guild.id)
+        await player.set_volume(int(state.volume * 100))
         return player
 
     def _is_url(self, query: str) -> bool:
@@ -299,36 +295,39 @@ class MusicLavalink(commands.Cog):
             return
 
         if player.queue.is_empty:
-            self.current_song[guild_id] = None
+            state = self.states.get_or_create(guild_id)
+            state.current_song = None
             return
 
         track = player.queue.get()
-        self.current_song[guild_id] = track
-        self.skip_votes[guild_id] = set()
-        self.stop_votes[guild_id] = set()
-        await player.play(track, volume=self.volumes.get(guild_id, 50))
+        state = self.states.get_or_create(guild_id)
+        state.current_song = track
+        state.skip_votes.clear()
+        state.stop_votes.clear()
+        await player.play(track, volume=int(state.volume * 100))
 
         # Send Now Playing message with buttons
-        channel_id = self.last_channel.get(guild_id)
+        channel_id = state.last_channel_id
         if channel_id:
             channel = self.bot.get_channel(channel_id)
             if channel and isinstance(channel, discord.abc.Messageable):
                 view = MusicPlayerView(self, channel)
 
                 # Delete old NP message
-                if guild_id in self.last_np_msg and self.last_np_msg[guild_id]:
+                if state.last_np_msg_id:
                     try:
-                        await self.last_np_msg[guild_id].delete()
-                    except:
+                        old_msg = await channel.fetch_message(state.last_np_msg_id)
+                        await old_msg.delete()
+                    except Exception:
                         pass
 
-                loop_mode = self.loops.get(guild_id, 0)
+                loop_mode = state.loop_mode
                 loop_msg = ""
                 if loop_mode == 1: loop_msg = "🔂 Loop Current"
                 elif loop_mode == 2: loop_msg = "🔁 Loop All"
 
                 msg = await channel.send(f"Now playing: **{track.title}** {loop_msg}", view=view)
-                self.last_np_msg[guild_id] = msg
+                state.last_np_msg_id = msg.id
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
@@ -338,7 +337,8 @@ class MusicLavalink(commands.Cog):
 
         guild_id = player.guild.id
         ended_track = payload.track
-        loop_mode = self.loops.get(guild_id, 0)
+        state = self.states.get_or_create(guild_id)
+        loop_mode = state.loop_mode
 
         if loop_mode == 1 and ended_track:
             try:
@@ -369,11 +369,9 @@ class MusicLavalink(commands.Cog):
         player = ctx.voice_client
         if isinstance(player, wavelink.Player):
             await player.disconnect()
-
-            self.current_song.pop(ctx.guild.id, None)
-            self.loops.pop(ctx.guild.id, None)
-            self.skip_votes.pop(ctx.guild.id, None)
-            self.stop_votes.pop(ctx.guild.id, None)
+            state = self.states.remove(ctx.guild.id)
+            if state:
+                await state.cleanup_message(self.bot)
 
             await ctx.send("Left the channel")
             return
@@ -383,7 +381,8 @@ class MusicLavalink(commands.Cog):
     @commands.command(name="play", aliases=["p"])
     @ensure_voice()
     async def play(self, ctx: commands.Context, *, query: str) -> None:
-        self.last_channel[ctx.guild.id] = ctx.channel.id
+        state = self.states.get_or_create(ctx.guild.id)
+        state.last_channel_id = ctx.channel.id
         player = await self._ensure_player(ctx)
 
         if "spotify.com" in query or "spotify:" in query:
@@ -418,7 +417,7 @@ class MusicLavalink(commands.Cog):
             await ctx.send(f"Found {len(queries)} tracks. Resolving and adding to queue...")
 
             # Concurrent Spotify Loading
-            sem = asyncio.Semaphore(5)
+            sem = asyncio.Semaphore(3)
             added_count = 0
 
             async def fetch_and_queue(search_query: str) -> None:
@@ -496,7 +495,8 @@ class MusicLavalink(commands.Cog):
     @commands.command(name="loop", aliases=["lp"])
     @ensure_voice()
     async def loop(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
-        current_state = self.loops.get(ctx.guild.id, 0)
+        state = self.states.get_or_create(ctx.guild.id)
+        current_state = state.loop_mode
 
         if mode:
             mode = mode.lower()
@@ -511,7 +511,7 @@ class MusicLavalink(commands.Cog):
         else:
             new_state = (current_state + 1) % 3
 
-        self.loops[ctx.guild.id] = new_state
+        state.loop_mode = new_state
         msg = "Loop disabled ➡️"
         if new_state == 1:
             msg = "Looping **Current Song** 🔂"
@@ -527,7 +527,8 @@ class MusicLavalink(commands.Cog):
             return await ctx.send("Not connected to a voice channel.")
 
         guild_id = ctx.guild.id
-        current = self.current_song.get(guild_id)
+        state = self.states.get_or_create(guild_id)
+        current = state.current_song
 
         can_stop = False
         if self._requester_from_track(current) == ctx.author.id:
@@ -536,22 +537,22 @@ class MusicLavalink(commands.Cog):
             can_stop = True
 
         if not can_stop:
-            self.stop_votes.setdefault(guild_id, set())
-            if ctx.author.id in self.stop_votes[guild_id]:
+            if ctx.author.id in state.stop_votes:
                 return await ctx.send("You have already voted to stop.")
 
-            self.stop_votes[guild_id].add(ctx.author.id)
+            state.stop_votes.add(ctx.author.id)
             votes_needed = 3
-            current_votes = len(self.stop_votes[guild_id])
+            current_votes = len(state.stop_votes)
             if current_votes < votes_needed:
                 return await ctx.send(f"🗳️ Vote to **stop** registered. [{current_votes}/{votes_needed}]")
 
         player.queue.clear()
         await player.skip()
-        self.current_song[guild_id] = None
-        self.loops[guild_id] = 0
-        self.skip_votes[guild_id] = set()
-        self.stop_votes[guild_id] = set()
+        state.current_song = None
+        state.loop_mode = 0
+        state.skip_votes.clear()
+        state.stop_votes.clear()
+        await state.cleanup_message(self.bot)
         await ctx.send("⏹️ Stopped and cleared queue.")
 
     @commands.command(name="skip", aliases=["s", "next"])
@@ -562,7 +563,8 @@ class MusicLavalink(commands.Cog):
             return await ctx.send("Nothing is playing.")
 
         guild_id = ctx.guild.id
-        current = self.current_song.get(guild_id)
+        state = self.states.get_or_create(guild_id)
+        current = state.current_song
 
         can_skip = False
         if self._requester_from_track(current) == ctx.author.id:
@@ -571,13 +573,12 @@ class MusicLavalink(commands.Cog):
             can_skip = True
 
         if not can_skip:
-            self.skip_votes.setdefault(guild_id, set())
-            if ctx.author.id in self.skip_votes[guild_id]:
+            if ctx.author.id in state.skip_votes:
                 return await ctx.send("You have already voted to skip.")
 
-            self.skip_votes[guild_id].add(ctx.author.id)
+            state.skip_votes.add(ctx.author.id)
             votes_needed = 3
-            current_votes = len(self.skip_votes[guild_id])
+            current_votes = len(state.skip_votes)
             if current_votes < votes_needed:
                 return await ctx.send(f"🗳️ Vote to **skip** registered. [{current_votes}/{votes_needed}]")
 
@@ -684,7 +685,8 @@ class MusicLavalink(commands.Cog):
         if not isinstance(player, wavelink.Player):
             return await ctx.send("Not connected to a voice channel.")
 
-        self.volumes[ctx.guild.id] = volume
+        state = self.states.get_or_create(ctx.guild.id)
+        state.volume = volume / 100
         await player.set_volume(volume)
         await ctx.send(f"🔊 Volume set to **{volume}%**")
 

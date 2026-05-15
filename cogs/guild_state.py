@@ -6,7 +6,6 @@ and simplify state access patterns.
 from typing import Optional, Dict, Any, Set
 import discord
 from dataclasses import dataclass, field
-import time
 
 
 @dataclass
@@ -16,7 +15,7 @@ class GuildState:
     
     # Queue and playback
     queue: list = field(default_factory=list)
-    current_song: Optional[Dict[str, Any]] = None
+    current_song: Optional[Any] = None
     loop_mode: int = 0  # 0: Off, 1: Current, 2: All
     
     # Volume and playback timing
@@ -30,7 +29,7 @@ class GuildState:
     stop_votes: Set[int] = field(default_factory=set)
     
     # Message tracking
-    last_np_msg: Optional[discord.Message] = None
+    last_np_msg_id: Optional[int] = None
     last_channel_id: Optional[int] = None
     
     # Cleanup
@@ -47,15 +46,19 @@ class GuildState:
         self.pause_start = None
         self.pause_votes.clear()
     
-    async def cleanup_message(self) -> None:
-        """Safely delete the last now-playing message."""
-        if self.last_np_msg:
+    async def cleanup_message(self, bot: discord.Client) -> None:
+        """Safely delete the last now-playing message by id."""
+        if not self.last_channel_id or not self.last_np_msg_id:
+            return
+
+        channel = bot.get_channel(self.last_channel_id)
+        if channel and isinstance(channel, discord.abc.Messageable):
             try:
-                await self.last_np_msg.delete()
-            except (discord.NotFound, discord.Forbidden):
+                old_msg = await channel.fetch_message(self.last_np_msg_id)
+                await old_msg.delete()
+            except Exception:
                 pass
-            finally:
-                self.last_np_msg = None
+        self.last_np_msg_id = None
 
 
 class GuildStateManager:
@@ -90,7 +93,6 @@ class GuildStateManager:
         state = self.states.get(guild_id)
         if state:
             state.is_cleaning_up = True
-            await state.cleanup_message()
             state.queue.clear()
             state.current_song = None
             state.reset_votes()

@@ -16,6 +16,10 @@ import urllib.request
 import base64
 from typing import Optional, Dict, List, Any, Set, cast, Union
 
+from cogs.extract_cache import ExtractInfoCache
+from cogs.guild_state import GuildStateManager, GuildState
+from cogs.perf_config import OptimizedFFmpegOptions
+
 def _votes_needed(vc: discord.VoiceProtocol) -> int:
     """Dynamic vote threshold based on non-bot members in the voice channel."""
     channel = getattr(vc, 'channel', None)
@@ -71,17 +75,9 @@ def ensure_voice():
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot: commands.Bot = bot
-        self.queues: Dict[int, List[Dict[str, Any]]] = {}
-        self.loops: Dict[int, int] = {} # 0: Off, 1: Current, 2: All
-        self.volumes: Dict[int, float] = {} # {guild_id: volume_float}
-        self.current_song: Dict[int, Optional[Dict[str, Any]]] = {} # {guild_id: song_entry}
-        self.last_np_msg: Dict[int, Optional[discord.Message]] = {} # {guild_id: message}
-        self.last_channel: Dict[int, int] = {} # {guild_id: channel_id}
-        self.start_times: Dict[int, float] = {} # {guild_id: time.time()}
-        self.pause_starts: Dict[int, float] = {} # {guild_id: time.time()}
-        self.pause_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
-        self.skip_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
-        self.stop_votes: Dict[int, Set[int]] = {} # {guild_id: set(user_id)}
+        self.states = GuildStateManager()
+        self.cache = ExtractInfoCache(max_size=100)
+        self._save_queues_task: Optional[asyncio.Task[None]] = None
         self.youtube_auth_ready: bool = False
         self.yt_dlp_options: Dict[str, Any] = {
             'format': 'bestaudio/best',
@@ -187,17 +183,7 @@ class Music(commands.Cog):
             for p in checked_paths:
                 print(f" - {p}")
 
-        self.ffmpeg_options: Dict[str, str] = {
-            'before_options': (
-                '-reconnect 1 '
-                '-reconnect_streamed 1 '
-                '-reconnect_at_eof 1 '
-                '-reconnect_on_network_error 1 '
-                '-reconnect_delay_max 5 '
-                '-rw_timeout 15000000'
-            ),
-            'options': '-vn -probesize 32 -analyzeduration 0 -bufsize 64k',
-        }
+        self.ffmpeg_options = OptimizedFFmpegOptions.get('standard')
         self.ytdl = yt_dlp.YoutubeDL(self.yt_dlp_options)
         
         # Spotify Init
@@ -216,13 +202,28 @@ class Music(commands.Cog):
         # Load persistent queues
         self.load_queues()
 
+    def _get_state(self, guild_id: int) -> GuildState:
+        return self.states.get_or_create(guild_id)
+
+    def _schedule_save_queues(self) -> None:
+        if self._save_queues_task and not self._save_queues_task.done():
+            return
+        self._save_queues_task = asyncio.create_task(self._save_queues_async())
+
+    async def _save_queues_async(self) -> None:
+        await asyncio.to_thread(self.save_queues)
+
     def save_queues(self) -> None:
         try:
+            data: Dict[str, Any] = {}
+            for guild_id, state in self.states.states.items():
+                if state.queue:
+                    data[str(guild_id)] = state.queue
             # Ensure directory exists before writing
             if self.queue_file:
                 os.makedirs(os.path.dirname(self.queue_file), exist_ok=True)
             with open(self.queue_file, 'w') as f:
-                json.dump(self.queues, f)
+                json.dump(data, f)
         except Exception as e:
             print(f"Error saving queues: {e}")
 
@@ -231,7 +232,14 @@ class Music(commands.Cog):
             try:
                 with open(self.queue_file, 'r') as f:
                     data = json.load(f)
-                    self.queues = {int(k): v for k, v in data.items()}
+                for k, v in data.items():
+                    try:
+                        guild_id = int(k)
+                    except Exception:
+                        continue
+                    state = self._get_state(guild_id)
+                    if isinstance(v, list):
+                        state.queue = v
                 print("Loaded persistent queues.")
             except Exception as e:
                 print(f"Error loading queues: {e}")
@@ -242,13 +250,14 @@ class Music(commands.Cog):
         if member.id == self.bot.user.id and before.channel and not after.channel:
             # Bot was disconnected
             guild_id = member.guild.id
-            if guild_id in self.current_song and self.current_song[guild_id]:
+            state = self._get_state(guild_id)
+            if state.current_song:
                   # Bot was playing something, wait and try to reconnect
                   print(f"Bot disconnected from {member.guild.name}. Attempting recovery...")
                   await asyncio.sleep(2) # Add short delay
                   try:
                       vc = await before.channel.connect()
-                      if guild_id in self.current_song:
+                      if state.current_song:
                            print("Reconnected! Resuming play_next...")
                            # Restart next
                            await self.play_recover(member.guild, vc)
@@ -258,19 +267,61 @@ class Music(commands.Cog):
     async def play_recover(self, guild: discord.Guild, vc: discord.VoiceClient) -> None:
          # Resumes execution with the current song / queue if possible
          guild_id = guild.id
-         if guild_id in self.current_song and self.current_song[guild_id]:
-             entry = cast(Dict[str, Any], self.current_song[guild_id])
-             refreshed_stream = await self._refresh_stream_url(entry)
-             if refreshed_stream:
-                 entry['stream_url'] = refreshed_stream
+         state = self._get_state(guild_id)
+         if state.current_song:
+             entry = cast(Dict[str, Any], state.current_song)
+             filename = await self._resolve_stream_url(entry)
+             if not filename:
+                 return
              source = discord.FFmpegPCMAudio(
-                 entry['stream_url'],
+                 filename,
                  before_options=self.ffmpeg_options['before_options'],
                  options=self.ffmpeg_options['options'],
              )
              source = discord.PCMVolumeTransformer(source)
-             source.volume = self.volumes.get(guild_id, 0.5)
+             source.volume = state.volume
              vc.play(source, after=self._make_after_play(guild_id, vc, None))
+
+    async def _resolve_stream_url(self, entry: Dict[str, Any]) -> Optional[str]:
+        stream_url = entry.get('stream_url')
+        if isinstance(stream_url, str) and stream_url.strip():
+            refreshed = await self._refresh_stream_url(entry)
+            if refreshed:
+                entry['stream_url'] = refreshed
+                return refreshed
+            return stream_url
+
+        search_query = entry.get('search_query')
+        if isinstance(search_query, str) and search_query.strip():
+            data = await self._extract_info_async(f"ytsearch:{search_query}")
+            if data and 'entries' in data and data['entries']:
+                candidate_entries = [e for e in data['entries'] if isinstance(e, dict)]
+                track_data = await self._pick_playable_entry(candidate_entries)
+                if track_data:
+                    entry['url'] = track_data.get('webpage_url') or entry.get('url')
+                    entry['stream_url'] = track_data.get('url')
+                    entry['title'] = track_data.get('title', entry.get('title') or search_query)
+                    entry['duration'] = track_data.get('duration')
+                    entry['thumbnail'] = track_data.get('thumbnail')
+                    resolved = entry.get('stream_url')
+                    if isinstance(resolved, str) and resolved.strip():
+                        return resolved
+            return None
+
+        original_url = entry.get('url')
+        if isinstance(original_url, str) and original_url.strip():
+            data = await self._extract_info_async(original_url)
+            if isinstance(data, dict):
+                resolved = data.get('url')
+                if isinstance(resolved, str) and resolved.strip():
+                    entry['stream_url'] = resolved
+                    entry.setdefault('title', data.get('title'))
+                    entry.setdefault('duration', data.get('duration'))
+                    entry.setdefault('thumbnail', data.get('thumbnail'))
+                    entry.setdefault('url', data.get('webpage_url') or original_url)
+                    return resolved
+
+        return None
 
     async def _refresh_stream_url(self, entry: Dict[str, Any]) -> Optional[str]:
         """Refresh potentially expired stream URL from original track URL."""
@@ -302,43 +353,37 @@ class Music(commands.Cog):
         await self.play_next_internal(ctx.guild.id, ctx.voice_client, ctx)
         
     async def play_next_internal(self, guild_id: int, vc: Optional[discord.VoiceProtocol], ctx: Optional[commands.Context] = None) -> None:
-        if not vc: return
-        loops = self.loops.get(guild_id, 0)
-        previous_song = self.current_song.get(guild_id)
+        if not vc:
+            return
+
+        state = self._get_state(guild_id)
+        loops = state.loop_mode
+        previous_song = state.current_song
         
         entry = None
         if loops == 1 and previous_song:
             entry = previous_song
         elif loops == 2 and previous_song:
-            if guild_id not in self.queues:
-                self.queues[guild_id] = []
-            self.queues[guild_id].append(previous_song)
-            self.save_queues()
+            state.queue.append(previous_song)
+            self._schedule_save_queues()
             
         if not entry:
-            if guild_id in self.queues and self.queues[guild_id]:
-                entry = self.queues[guild_id].pop(0)
-                self.save_queues()
+            if state.queue:
+                entry = state.queue.pop(0)
+                self._schedule_save_queues()
             else:
-                self.current_song[guild_id] = None
+                state.current_song = None
                 return
 
-        requester_id = entry.get('requester_id')
-        title = entry.get('title', 'Unknown Title')
-        
         try:
-            # FIX REDUNDANT EXTRACTION: We already have stream_url inside entry
-            refreshed_stream = await self._refresh_stream_url(entry)
-            filename = refreshed_stream or entry['stream_url']
-            entry['stream_url'] = filename
+            filename = await self._resolve_stream_url(entry)
+            if not filename:
+                raise RuntimeError("Stream URL resolution failed")
             
-            self.current_song[guild_id] = entry
-            self.start_times[guild_id] = time.time()
-            if guild_id in self.pause_starts:
-                del self.pause_starts[guild_id]
-            self.pause_votes[guild_id] = set()
-            self.skip_votes[guild_id] = set()
-            self.stop_votes[guild_id] = set()
+            state.current_song = entry
+            state.start_time = time.time()
+            state.clear_pause_state()
+            state.reset_votes()
             
             source = discord.FFmpegPCMAudio(
                 filename,
@@ -346,31 +391,40 @@ class Music(commands.Cog):
                 options=self.ffmpeg_options['options'],
             )
             source = discord.PCMVolumeTransformer(source)
-            source.volume = self.volumes.get(guild_id, 0.5)
+            source.volume = state.volume
 
             if vc and vc.is_connected():
                  vc.play(source, after=self._make_after_play(guild_id, vc, ctx))
                  
-                 if ctx or guild_id in self.last_channel:
-                     channel = ctx.channel if ctx else self.bot.get_channel(self.last_channel[guild_id])
-                     if channel and isinstance(channel, discord.abc.Messageable):
-                         view = MusicPlayerView(self, ctx or channel) # type: ignore
-                         loop_msg = ""
-                         if loops == 1: loop_msg = "🔂 Loop Current"
-                         elif loops == 2: loop_msg = "🔁 Loop All"
-                         
-                         if guild_id in self.last_np_msg and self.last_np_msg[guild_id]:
-                             try:
-                                await self.last_np_msg[guild_id].delete()
-                             except:
-                                pass
+                 if ctx:
+                     state.last_channel_id = ctx.channel.id
 
+                 if state.last_channel_id:
+                     channel = ctx.channel if ctx else self.bot.get_channel(state.last_channel_id)
+                     if channel and isinstance(channel, discord.abc.Messageable):
+                         view = MusicPlayerView(self, guild_id)
+                         loop_msg = ""
+                         if loops == 1:
+                             loop_msg = "🔂 Loop Current"
+                         elif loops == 2:
+                             loop_msg = "🔁 Loop All"
+
+                         if state.last_np_msg_id:
+                             try:
+                                 old_msg = await channel.fetch_message(state.last_np_msg_id)
+                                 await old_msg.delete()
+                             except Exception:
+                                 pass
+
+                         title = entry.get('title', 'Unknown Title')
                          msg = await channel.send(f'Now playing: **{title}** {loop_msg}', view=view)
-                         self.last_np_msg[guild_id] = msg
+                         state.last_np_msg_id = msg.id
             
         except Exception as e:
             print(f"Error processing song: {e}")
-            if ctx: await ctx.send(f"Error playing **{title}**. Skipping...")
+            if ctx:
+                title = entry.get('title', 'Unknown Title')
+                await ctx.send(f"Error playing **{title}**. Skipping...")
             await self.play_next_internal(guild_id, vc, ctx)
 
     @commands.command(name='join', aliases=['j'])
@@ -392,15 +446,13 @@ class Music(commands.Cog):
         if ctx.voice_client:
             # Force disconnect to ensure underlying voice/ffmpeg resources are torn down.
             await ctx.voice_client.disconnect(force=True)
-            if ctx.guild.id in self.queues:
-                del self.queues[ctx.guild.id]
-                self.save_queues()
-            if ctx.guild.id in self.current_song:
-                del self.current_song[ctx.guild.id]
-            if ctx.guild.id in self.loops:
-                del self.loops[ctx.guild.id]
-            if ctx.guild.id in self.last_np_msg:
-                del self.last_np_msg[ctx.guild.id]
+            state = self.states.remove(ctx.guild.id)
+            if state:
+                state.queue.clear()
+                state.current_song = None
+                state.reset_votes()
+                await state.cleanup_message(self.bot)
+                self._schedule_save_queues()
             await ctx.send('Left the channel')
         else:
             await ctx.send('I am not in a voice channel!')
@@ -408,7 +460,8 @@ class Music(commands.Cog):
     @commands.command(name='loop', aliases=['lp'])
     @ensure_voice()
     async def loop(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
-        current_state = self.loops.get(ctx.guild.id, 0)
+        state = self._get_state(ctx.guild.id)
+        current_state = state.loop_mode
         if mode:
             mode = mode.lower()
             if mode == 'all':
@@ -422,7 +475,7 @@ class Music(commands.Cog):
         else:
             new_state = (current_state + 1) % 3
             
-        self.loops[ctx.guild.id] = new_state
+        state.loop_mode = new_state
         msg = "Loop disabled ➡️"
         if new_state == 1:
             msg = "Looping **Current Song** 🔂"
@@ -431,6 +484,10 @@ class Music(commands.Cog):
         await ctx.send(msg)
 
     async def _extract_info_async(self, query: str) -> Optional[Dict[str, Any]]:
+        cached_data = self.cache.get(query)
+        if cached_data is not None:
+            return cached_data
+
         loop = asyncio.get_event_loop()
 
         def _extract_with_fallback() -> Optional[Dict[str, Any]]:
@@ -474,7 +531,10 @@ class Music(commands.Cog):
                 return None
 
         try:
-            return await loop.run_in_executor(None, _extract_with_fallback)
+            data = await loop.run_in_executor(None, _extract_with_fallback)
+            if data is not None:
+                self.cache.set(query, data)
+            return data
         except Exception as e:
             print(f"Failed to extract info for {query}: {e}")
             return None
@@ -696,7 +756,8 @@ class Music(commands.Cog):
                 "Please configure `YOUTUBE_COOKIES` or `cookies.txt` to enable playback."
             )
             
-        self.last_channel[ctx.guild.id] = ctx.channel.id
+        state = self._get_state(ctx.guild.id)
+        state.last_channel_id = ctx.channel.id
         if not ctx.voice_client:
             try:
                 if ctx.author.voice:
@@ -776,55 +837,28 @@ class Music(commands.Cog):
                     'title': track_data.get('title', first_query),
                     'duration': track_data.get('duration'),
                     'thumbnail': track_data.get('thumbnail'),
-                    'requester_id': ctx.author.id
+                    'requester_id': ctx.author.id,
                 }
-                if ctx.guild.id not in self.queues:
-                    self.queues[ctx.guild.id] = []
-                self.queues[ctx.guild.id].append(entry)
-                self.save_queues()
+                state.queue.append(entry)
+                self._schedule_save_queues()
                 
                 if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
                     await self.play_next(ctx)
             else:
                  await ctx.send(f"Could not find **{first_query}** on YouTube.")
 
-            # Concurrent Spotify Loading
-            async def add_remaining_tracks() -> None:
-                added_count = 1
-                
-                # Use Semaphore to limit concurrency overhead
-                sem = asyncio.Semaphore(5)
-                
-                async def fetch_and_queue(search_query: str) -> None:
-                    nonlocal added_count
-                    async with sem:
-                        res = await self._extract_info_async(f"ytsearch:{search_query}")
-                        if res and 'entries' in res and res['entries']:
-                            candidate_entries = [e for e in res['entries'] if isinstance(e, dict)]
-                            t_data = await self._pick_playable_entry(candidate_entries)
-                            if not t_data:
-                                return
-
-                            t_entry = {
-                                'url': t_data.get('webpage_url'),
-                                'stream_url': t_data.get('url'),
-                                'title': t_data.get('title', search_query),
-                                'duration': t_data.get('duration'),
-                                'thumbnail': t_data.get('thumbnail'),
-                                'requester_id': ctx.author.id
-                            }
-                            self.queues[ctx.guild.id].append(t_entry)
-                            added_count += 1
-                
-                tasks = [fetch_and_queue(sq) for sq in tracks_to_search[1:]]
-                if tasks:
-                    await asyncio.gather(*tasks)
-                    self.save_queues()
-                        
-                await ctx.send(f"✅ Finished adding all {added_count} Spotify tracks to queue.")
-
-            if len(tracks_to_search) > 1:
-                asyncio.create_task(add_remaining_tracks())
+            remaining = tracks_to_search[1:]
+            for search_query in remaining:
+                state.queue.append(
+                    {
+                        'search_query': search_query,
+                        'title': search_query,
+                        'requester_id': ctx.author.id,
+                    }
+                )
+            if remaining:
+                self._schedule_save_queues()
+            await ctx.send(f"✅ Finished adding all {len(tracks_to_search)} Spotify tracks to queue.")
             return
 
         await ctx.send(f"Searching for **{query}**...")
@@ -857,23 +891,20 @@ class Music(commands.Cog):
         if not tracks_to_add:
             return await ctx.send("No songs found.")
 
-        if ctx.guild.id not in self.queues:
-            self.queues[ctx.guild.id] = []
-            
         added_count = 0
         for track in tracks_to_add:
             entry = {
                 'url': track.get('original_url') or track.get('webpage_url') or track.get('url'),
-                'stream_url': track.get('url'), 
+                'stream_url': track.get('url'),
                 'title': track.get('title', 'Unknown Title'),
                 'duration': track.get('duration'),
                 'thumbnail': track.get('thumbnail'),
                 'requester_id': ctx.author.id
             }
-            self.queues[ctx.guild.id].append(entry)
+            state.queue.append(entry)
             added_count += 1
         
-        self.save_queues()
+        self._schedule_save_queues()
         
         if added_count == 1:
             await ctx.send(f"Added to queue: **{tracks_to_add[0].get('title')}**")
@@ -887,20 +918,22 @@ class Music(commands.Cog):
     @ensure_voice()
     async def pause(self, ctx: commands.Context) -> None:
         if ctx.voice_client and ctx.voice_client.is_playing():
+            state = self._get_state(ctx.guild.id)
             ctx.voice_client.pause()
-            self.pause_starts[ctx.guild.id] = time.time()
+            state.pause_start = time.time()
             await ctx.send("Paused ⏸️")
 
     @commands.command(name='resume', aliases=['res'])
     @ensure_voice()
     async def resume(self, ctx: commands.Context) -> None:
         if ctx.voice_client and ctx.voice_client.is_paused():
+            state = self._get_state(ctx.guild.id)
             ctx.voice_client.resume()
-            if ctx.guild.id in self.pause_starts:
-                paused_duration = time.time() - self.pause_starts[ctx.guild.id]
-                if ctx.guild.id in self.start_times:
-                    self.start_times[ctx.guild.id] += paused_duration
-                del self.pause_starts[ctx.guild.id]
+            if state.pause_start:
+                paused_duration = time.time() - state.pause_start
+                if state.start_time:
+                    state.start_time += paused_duration
+                state.pause_start = None
             await ctx.send("Resumed ▶️")
 
     @commands.command(name='stop', aliases=['st'])
@@ -910,45 +943,41 @@ class Music(commands.Cog):
             return await ctx.send("Not connected to a voice channel.")
             
         guild_id = ctx.guild.id
-        current = self.current_song.get(guild_id)
+        state = self._get_state(guild_id)
+        current = state.current_song
         
         can_stop = False
         if current and current.get('requester_id') == ctx.author.id:
             can_stop = True
-        elif ctx.author.guild.permissions.administrator:
+        elif ctx.author.guild_permissions.administrator:
             can_stop = True
             
         if not can_stop:
-            if guild_id not in self.stop_votes:
-                self.stop_votes[guild_id] = set()
-                
-            if ctx.author.id in self.stop_votes[guild_id]:
+            if ctx.author.id in state.stop_votes:
                 return await ctx.send("You have already voted to stop.")
                 
-            self.stop_votes[guild_id].add(ctx.author.id)
+            state.stop_votes.add(ctx.author.id)
             votes_needed = _votes_needed(ctx.voice_client) if ctx.voice_client else 3
-            current_votes = len(self.stop_votes[guild_id])
+            current_votes = len(state.stop_votes)
             if current_votes < votes_needed:
                 return await ctx.send(embed=_make_vote_embed("stop", current_votes, votes_needed, ctx.author))
                 
         ctx.voice_client.stop()
-        self.queues[ctx.guild.id] = []
-        self.save_queues()
-        self.current_song[ctx.guild.id] = None
-        self.loops[ctx.guild.id] = 0
-        self.skip_votes[ctx.guild.id] = set()
-        self.stop_votes[ctx.guild.id] = set()
-        
-        if ctx.guild.id in self.last_np_msg:
-            del self.last_np_msg[ctx.guild.id]
+        state.queue.clear()
+        state.current_song = None
+        state.loop_mode = 0
+        state.reset_votes()
+        await state.cleanup_message(self.bot)
+        self._schedule_save_queues()
 
         await ctx.send("⏹️ Stopped and cleared queue.")
 
     @commands.command(name='queue', aliases=['q'])
     @ensure_voice()
     async def queue(self, ctx: commands.Context) -> None:
-        if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
-            queue_list = self.queues[ctx.guild.id]
+        state = self._get_state(ctx.guild.id)
+        if state.queue:
+            queue_list = state.queue
             view = QueuePaginationView(ctx, queue_list)
             embed = view.get_embed()
             view.update_buttons()
@@ -963,33 +992,32 @@ class Music(commands.Cog):
             return await ctx.send("Nothing is playing.")
             
         guild_id = ctx.guild.id
-        current = self.current_song.get(guild_id)
+        state = self._get_state(guild_id)
+        current = state.current_song
         
         can_skip = False
         if current and current.get('requester_id') == ctx.author.id:
             can_skip = True
-        elif ctx.author.guild.permissions.administrator:
+        elif ctx.author.guild_permissions.administrator:
             can_skip = True
             
         if not can_skip:
-            if guild_id not in self.skip_votes:
-                self.skip_votes[guild_id] = set()
-            if ctx.author.id in self.skip_votes[guild_id]:
+            if ctx.author.id in state.skip_votes:
                 return await ctx.send("You have already voted to skip.")
-            self.skip_votes[guild_id].add(ctx.author.id)
+            state.skip_votes.add(ctx.author.id)
             votes_needed = _votes_needed(ctx.voice_client) if ctx.voice_client else 3
-            current_votes = len(self.skip_votes[guild_id])
+            current_votes = len(state.skip_votes)
             if current_votes < votes_needed:
                 return await ctx.send(embed=_make_vote_embed("skip", current_votes, votes_needed, ctx.author))
                 
         if index is not None:
-            if ctx.guild.id not in self.queues or not self.queues[ctx.guild.id]:
+            if not state.queue:
                 return await ctx.send("Queue is empty, cannot skip to specific index.")
-            if index < 1 or index > len(self.queues[ctx.guild.id]):
-                 return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(self.queues[ctx.guild.id])}.")
-            target_song = self.queues[ctx.guild.id].pop(index-1)
-            self.queues[ctx.guild.id].insert(0, target_song)
-            self.save_queues()
+            if index < 1 or index > len(state.queue):
+                 return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(state.queue)}.")
+            target_song = state.queue.pop(index-1)
+            state.queue.insert(0, target_song)
+            self._schedule_save_queues()
             await ctx.send(f"⏭️ Skipping to **{target_song['title']}**...")
             ctx.voice_client.stop()
         else:
@@ -1001,7 +1029,8 @@ class Music(commands.Cog):
     async def remove_from_queue(self, ctx: commands.Context, *, target: str) -> None:
         """Remove queue item(s). Supports compatibility syntax like `!r cl 10`."""
         guild_id = ctx.guild.id
-        if guild_id not in self.queues or not self.queues[guild_id]:
+        state = self._get_state(guild_id)
+        if not state.queue:
             return await ctx.send("Queue is empty.")
 
         tokens = target.strip().split()
@@ -1012,9 +1041,9 @@ class Music(commands.Cog):
 
         if first in {'cl', 'clear', 'clean'}:
             if len(tokens) == 1:
-                removed_count = len(self.queues[guild_id])
-                self.queues[guild_id] = []
-                self.save_queues()
+                removed_count = len(state.queue)
+                state.queue = []
+                self._schedule_save_queues()
                 return await ctx.send(f"🧹 Cleared queue ({removed_count} song(s)).")
 
             if not tokens[1].isdigit():
@@ -1026,24 +1055,25 @@ class Music(commands.Cog):
                 return await ctx.send("Invalid syntax. Use `!remove <index>` or `!remove clear [index]`.")
             index = int(first)
 
-        queue = self.queues[guild_id]
+        queue = state.queue
         if index < 1 or index > len(queue):
             return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(queue)}.")
 
         removed = queue.pop(index - 1)
-        self.save_queues()
+        self._schedule_save_queues()
         await ctx.send(f"🗑️ Removed from queue: **{removed.get('title', 'Unknown Title')}**")
 
     @commands.command(name='clear', aliases=['cq', 'clearqueue'])
     @ensure_voice()
     async def clear_queue(self, ctx: commands.Context) -> None:
         guild_id = ctx.guild.id
-        if guild_id not in self.queues or not self.queues[guild_id]:
+        state = self._get_state(guild_id)
+        if not state.queue:
             return await ctx.send("Queue is already empty.")
 
-        removed_count = len(self.queues[guild_id])
-        self.queues[guild_id] = []
-        self.save_queues()
+        removed_count = len(state.queue)
+        state.queue = []
+        self._schedule_save_queues()
         await ctx.send(f"🧹 Cleared queue ({removed_count} song(s)).")
 
     @commands.command(name='volume', aliases=['v', 'vol'])
@@ -1053,7 +1083,8 @@ class Music(commands.Cog):
             return await ctx.send("Not connected to a voice channel.")
         if volume < 0 or volume > 100:
             return await ctx.send("Volume must be between 0 and 100.")
-        self.volumes[ctx.guild.id] = volume / 100
+        state = self._get_state(ctx.guild.id)
+        state.volume = volume / 100
         if ctx.voice_client.source:
             if hasattr(ctx.voice_client.source, 'volume'):
                 ctx.voice_client.source.volume = volume / 100
@@ -1063,16 +1094,17 @@ class Music(commands.Cog):
     @ensure_voice()
     async def now_playing(self, ctx: commands.Context) -> None:
         guild_id = ctx.guild.id
-        if guild_id not in self.current_song or not self.current_song[guild_id]:
+        state = self._get_state(guild_id)
+        if not state.current_song:
             return await ctx.send("Nothing is currently playing.")
             
-        entry = self.current_song[guild_id]
+        entry = state.current_song
         current_time = 0
-        if guild_id in self.start_times:
-            if guild_id in self.pause_starts:
-                 current_time = self.pause_starts[guild_id] - self.start_times[guild_id]
+        if state.start_time:
+            if state.pause_start:
+                 current_time = state.pause_start - state.start_time
             else:
-                 current_time = time.time() - self.start_times[guild_id]
+                 current_time = time.time() - state.start_time
         
         duration = entry.get('duration', 0)
         bar_length = 20
@@ -1100,16 +1132,16 @@ class Music(commands.Cog):
         await ctx.send(embed=embed)
 
 class MusicPlayerView(discord.ui.View):
-    def __init__(self, cog: Music, ctx: commands.Context):
+    def __init__(self, cog: "Music", guild_id: int):
         super().__init__(timeout=None)
         self.cog = cog
-        self.ctx = ctx
+        self.guild_id = guild_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not interaction.user.voice:
              await interaction.response.send_message("You need to be in a voice channel to use this button.", ephemeral=True)
              return False
-        vc = interaction.guild.voice_client
+        vc = interaction.guild.voice_client if interaction.guild else None
         if vc and vc.channel != interaction.user.voice.channel:
              await interaction.response.send_message("You need to be in the same voice channel as the bot to use this button.", ephemeral=True)
              return False
@@ -1117,60 +1149,62 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(label="⏯️ Pause/Resume", style=discord.ButtonStyle.primary, custom_id="music_pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        vc = self.ctx.guild.voice_client
+        vc = interaction.guild.voice_client if interaction.guild else None
         if not vc or not (vc.is_playing() or vc.is_paused()):
              await interaction.response.send_message("Nothing is playing!", ephemeral=True)
              return
+
+        state = self.cog._get_state(self.guild_id)
         
         if vc.is_paused():
             vc.resume()
-            self.cog.pause_votes[self.ctx.guild.id] = set()
+            if state.pause_start:
+                paused_duration = time.time() - state.pause_start
+                if state.start_time:
+                    state.start_time += paused_duration
+                state.pause_start = None
+            state.pause_votes.clear()
             await interaction.response.send_message("▶️ Resumed", ephemeral=True)
         else:
-            guild_id = self.ctx.guild.id
-            if interaction.user.guild.permissions.administrator:
+            if interaction.user.guild_permissions.administrator:
                 vc.pause()
-                self.cog.pause_votes[guild_id] = set()
+                state.pause_start = time.time()
+                state.pause_votes.clear()
                 await interaction.response.send_message("⏸️ Paused", ephemeral=True)
                 return
-
-            if guild_id not in self.cog.pause_votes:
-                self.cog.pause_votes[guild_id] = set()
-
-            if interaction.user.id in self.cog.pause_votes[guild_id]:
+            if interaction.user.id in state.pause_votes:
                 return await interaction.response.send_message("You have already voted to pause.", ephemeral=True)
 
-            self.cog.pause_votes[guild_id].add(interaction.user.id)
+            state.pause_votes.add(interaction.user.id)
             votes_needed = self._votes_needed(vc)
-            current_votes = len(self.cog.pause_votes[guild_id])
+            current_votes = len(state.pause_votes)
             if current_votes < votes_needed:
                 return await interaction.response.send_message(
                     embed=_make_vote_embed("pause", current_votes, votes_needed, interaction.user)
                 )
 
             vc.pause()
-            self.cog.pause_votes[guild_id] = set()
+            state.pause_start = time.time()
+            state.pause_votes.clear()
             await interaction.response.send_message("⏸️ Paused")
 
     @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id="music_skip")
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        vc = self.ctx.guild.voice_client
+        vc = interaction.guild.voice_client if interaction.guild else None
         if not vc or not (vc.is_playing() or vc.is_paused()):
             return await interaction.response.send_message("Nothing to skip", ephemeral=True)
             
-        guild_id = self.ctx.guild.id
-        current = self.cog.current_song.get(guild_id)
+        state = self.cog._get_state(self.guild_id)
+        current = state.current_song
         
-        can_skip = interaction.user.guild.permissions.administrator
+        can_skip = interaction.user.guild_permissions.administrator
             
         if not can_skip:
-            if guild_id not in self.cog.skip_votes:
-                self.cog.skip_votes[guild_id] = set()
-            if interaction.user.id in self.cog.skip_votes[guild_id]:
+            if interaction.user.id in state.skip_votes:
                 return await interaction.response.send_message("You have already voted to skip.", ephemeral=True)
-            self.cog.skip_votes[guild_id].add(interaction.user.id)
+            state.skip_votes.add(interaction.user.id)
             votes_needed = self._votes_needed(vc)
-            current_votes = len(self.cog.skip_votes[guild_id])
+            current_votes = len(state.skip_votes)
             if current_votes < votes_needed:
                 return await interaction.response.send_message(
                     embed=_make_vote_embed("skip", current_votes, votes_needed, interaction.user)
@@ -1180,9 +1214,10 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.success, custom_id="music_loop")
     async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        current_state = self.cog.loops.get(self.ctx.guild.id, 0)
+        state = self.cog._get_state(self.guild_id)
+        current_state = state.loop_mode
         new_state = (current_state + 1) % 3
-        self.cog.loops[self.ctx.guild.id] = new_state
+        state.loop_mode = new_state
         msg = "Loop disabled ➡️"
         if new_state == 1: msg = "Looping **Current Song** 🔂"
         elif new_state == 2: msg = "Looping **Queue** 🔁"
@@ -1190,35 +1225,32 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="music_stop")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        vc = self.ctx.guild.voice_client
+        vc = interaction.guild.voice_client if interaction.guild else None
         if not vc:
             return await interaction.response.send_message("Not connected", ephemeral=True)
             
-        guild_id = self.ctx.guild.id
-        current = self.cog.current_song.get(guild_id)
+        state = self.cog._get_state(self.guild_id)
+        current = state.current_song
         
-        can_stop = interaction.user.guild.permissions.administrator
+        can_stop = interaction.user.guild_permissions.administrator
             
         if not can_stop:
-            if guild_id not in self.cog.stop_votes:
-                self.cog.stop_votes[guild_id] = set()
-            if interaction.user.id in self.cog.stop_votes[guild_id]:
+            if interaction.user.id in state.stop_votes:
                 return await interaction.response.send_message("You have already voted to stop.", ephemeral=True)
-            self.cog.stop_votes[guild_id].add(interaction.user.id)
+            state.stop_votes.add(interaction.user.id)
             votes_needed = self._votes_needed(vc)
-            current_votes = len(self.cog.stop_votes[guild_id])
+            current_votes = len(state.stop_votes)
             if current_votes < votes_needed:
                 return await interaction.response.send_message(
                     embed=_make_vote_embed("stop", current_votes, votes_needed, interaction.user)
                 )
         vc.stop()
-        self.cog.queues[guild_id] = []
-        self.cog.save_queues()
-        self.cog.current_song[guild_id] = None
-        self.cog.loops[guild_id] = 0
-        self.cog.pause_votes[guild_id] = set()
-        self.cog.skip_votes[guild_id] = set()
-        self.cog.stop_votes[guild_id] = set()
+        state.queue.clear()
+        state.current_song = None
+        state.loop_mode = 0
+        state.reset_votes()
+        await state.cleanup_message(self.cog.bot)
+        self.cog._schedule_save_queues()
         await interaction.response.send_message("⏹️ Stopped and queue cleared")
 
     def _votes_needed(self, vc: discord.VoiceProtocol) -> int:
@@ -1226,8 +1258,9 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="music_queue")
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if self.ctx.guild.id in self.cog.queues and self.cog.queues[self.ctx.guild.id]:
-            queue_list = self.cog.queues[self.ctx.guild.id]
+        state = self.cog._get_state(self.guild_id)
+        if state.queue:
+            queue_list = state.queue
             max_lines = 10
             queue_str = "\n".join([f"{i+1}. {entry['title']}" for i, entry in enumerate(queue_list[:max_lines])])
             if len(queue_list) > max_lines:

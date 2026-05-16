@@ -80,6 +80,9 @@ class Music(commands.Cog):
         self.states = GuildStateManager()
         self.cache = ExtractInfoCache(max_size=100)
         self._save_queues_task: Optional[asyncio.Task[None]] = None
+        # Throttle/batch noisy playback error chat messages.
+        self._playback_error_buffers: Dict[int, List[str]] = {}
+        self._playback_error_flush_tasks: Dict[int, asyncio.Task[None]] = {}
         self.youtube_auth_ready: bool = False
         self.yt_dlp_options: Dict[str, Any] = {
             'format': 'bestaudio/best',
@@ -204,6 +207,36 @@ class Music(commands.Cog):
         # Load persistent queues
         self.load_queues()
 
+    def _buffer_playback_error(self, guild_id: int, title: str) -> None:
+        buf = self._playback_error_buffers.setdefault(guild_id, [])
+        if title:
+            buf.append(title)
+
+        if guild_id in self._playback_error_flush_tasks and not self._playback_error_flush_tasks[guild_id].done():
+            return
+        self._playback_error_flush_tasks[guild_id] = asyncio.create_task(self._flush_playback_errors(guild_id))
+
+    async def _flush_playback_errors(self, guild_id: int) -> None:
+        # Short delay to batch consecutive failures.
+        await asyncio.sleep(3)
+        titles = self._playback_error_buffers.pop(guild_id, [])
+        if not titles:
+            return
+
+        state = self.states.get(guild_id)
+        channel_id = state.last_channel_id if state else None
+        channel = self.bot.get_channel(channel_id) if channel_id else None
+        if not channel or not isinstance(channel, discord.abc.Messageable):
+            return
+
+        # Keep message compact to avoid spam.
+        unique = list(dict.fromkeys(titles))
+        shown = unique[:3]
+        more = max(0, len(unique) - len(shown))
+        shown_text = ", ".join(f"**{t}**" for t in shown if isinstance(t, str))
+        suffix = f" (+{more} lagi)" if more else ""
+        await channel.send(f"⚠️ Beberapa lagu gagal diputar dan dilewati: {shown_text}{suffix}.")
+
     def _get_state(self, guild_id: int) -> GuildState:
         return self.states.get_or_create(guild_id)
 
@@ -295,19 +328,16 @@ class Music(commands.Cog):
 
         search_query = entry.get('search_query')
         if isinstance(search_query, str) and search_query.strip():
-            data = await self._extract_info_async(f"ytsearch:{search_query}")
-            if data and 'entries' in data and data['entries']:
-                candidate_entries = [e for e in data['entries'] if isinstance(e, dict)]
-                track_data = await self._pick_playable_entry(candidate_entries)
-                if track_data:
-                    entry['url'] = track_data.get('webpage_url') or entry.get('url')
-                    entry['stream_url'] = track_data.get('url')
-                    entry['title'] = track_data.get('title', entry.get('title') or search_query)
-                    entry['duration'] = track_data.get('duration')
-                    entry['thumbnail'] = track_data.get('thumbnail')
-                    resolved = entry.get('stream_url')
-                    if isinstance(resolved, str) and resolved.strip():
-                        return resolved
+            track_data = await self._search_playable(search_query)
+            if track_data:
+                entry['url'] = track_data.get('webpage_url') or entry.get('url')
+                entry['stream_url'] = track_data.get('url')
+                entry['title'] = track_data.get('title', entry.get('title') or search_query)
+                entry['duration'] = track_data.get('duration')
+                entry['thumbnail'] = track_data.get('thumbnail')
+                resolved = entry.get('stream_url')
+                if isinstance(resolved, str) and resolved.strip():
+                    return resolved
             return None
 
         original_url = entry.get('url')
@@ -322,6 +352,19 @@ class Music(commands.Cog):
                     entry.setdefault('thumbnail', data.get('thumbnail'))
                     entry.setdefault('url', data.get('webpage_url') or original_url)
                     return resolved
+            # If URL extraction fails, fall back to searching by title.
+            title = entry.get('title')
+            if isinstance(title, str) and title.strip():
+                track_data = await self._search_playable(title)
+                if track_data:
+                    entry['url'] = track_data.get('webpage_url') or original_url
+                    entry['stream_url'] = track_data.get('url')
+                    entry['title'] = track_data.get('title', title)
+                    entry['duration'] = track_data.get('duration')
+                    entry['thumbnail'] = track_data.get('thumbnail')
+                    resolved = entry.get('stream_url')
+                    if isinstance(resolved, str) and resolved.strip():
+                        return resolved
 
         return None
 
@@ -424,9 +467,9 @@ class Music(commands.Cog):
             
         except Exception as e:
             print(f"Error processing song: {e}")
-            if ctx:
-                title = entry.get('title', 'Unknown Title')
-                await ctx.send(f"Error playing **{title}**. Skipping...")
+            title = entry.get('title', 'Unknown Title')
+            # Don't spam chat for bulk/playlist failures; batch errors instead.
+            self._buffer_playback_error(guild_id, title)
             await self.play_next_internal(guild_id, vc, ctx)
 
     @commands.command(name='join', aliases=['j'])
@@ -547,7 +590,7 @@ class Music(commands.Cog):
         Some ytsearch top results can fail with format-unavailable errors.
         This method probes several candidates and returns one with a usable stream URL.
         """
-        for candidate in entries[:5]:
+        for candidate in entries[:10]:
             stream_url = candidate.get('url')
             # Accept pre-resolved direct media URLs immediately.
             if (
@@ -573,6 +616,23 @@ class Music(commands.Cog):
                 if isinstance(resolved_stream, str) and resolved_stream.strip():
                     return resolved
 
+        return None
+
+    async def _search_playable(self, query: str) -> Optional[Dict[str, Any]]:
+        """Search YouTube and return a playable entry (best-effort)."""
+        query = (query or "").strip()
+        if not query:
+            return None
+
+        # Try wider searches so one bad top result doesn't fail the whole request.
+        for prefix in ("ytsearch1:", "ytsearch5:", "ytsearch10:", "ytsearch20:"):
+            data = await self._extract_info_async(f"{prefix}{query}")
+            if not data or "entries" not in data or not data["entries"]:
+                continue
+            candidate_entries = [e for e in data["entries"] if isinstance(e, dict)]
+            chosen = await self._pick_playable_entry(candidate_entries)
+            if chosen:
+                return chosen
         return None
 
     def _spotify_track_url_from_query(self, query: str) -> Optional[str]:
@@ -826,28 +886,23 @@ class Music(commands.Cog):
             await ctx.send(f"Found {len(tracks_to_search)} tracks. Adding to queue...")
 
             first_query = tracks_to_search[0]
-            data = await self._extract_info_async(f"ytsearch:{first_query}")
-            if data and 'entries' in data and data['entries']:
-                candidate_entries = [e for e in data['entries'] if isinstance(e, dict)]
-                track_data = await self._pick_playable_entry(candidate_entries)
-                if not track_data:
-                    return await ctx.send(f"Could not find a playable YouTube result for **{first_query}**.")
+            track_data = await self._search_playable(first_query)
+            if not track_data:
+                return await ctx.send(f"Could not find a playable YouTube result for **{first_query}**.")
 
-                entry = {
-                    'url': track_data.get('webpage_url'),
-                    'stream_url': track_data.get('url'),
-                    'title': track_data.get('title', first_query),
-                    'duration': track_data.get('duration'),
-                    'thumbnail': track_data.get('thumbnail'),
-                    'requester_id': ctx.author.id,
-                }
-                state.queue.append(entry)
-                self._schedule_save_queues()
-                
-                if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
-                    await self.play_next(ctx)
-            else:
-                 await ctx.send(f"Could not find **{first_query}** on YouTube.")
+            entry = {
+                'url': track_data.get('webpage_url'),
+                'stream_url': track_data.get('url'),
+                'title': track_data.get('title', first_query),
+                'duration': track_data.get('duration'),
+                'thumbnail': track_data.get('thumbnail'),
+                'requester_id': ctx.author.id,
+            }
+            state.queue.append(entry)
+            self._schedule_save_queues()
+            
+            if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                await self.play_next(ctx)
 
             remaining = tracks_to_search[1:]
             for search_query in remaining:
@@ -863,7 +918,7 @@ class Music(commands.Cog):
             await ctx.send(f"✅ Finished adding all {len(tracks_to_search)} Spotify tracks to queue.")
             return
 
-        await ctx.send(f"Searching for **{query}**...")
+        # Avoid spamming chat with progress messages; results will be posted after resolution.
         data = await self._extract_info_async(query)
 
         # Some yt-dlp builds fail to resolve plain-text queries with default_search.
@@ -882,7 +937,6 @@ class Music(commands.Cog):
         if 'entries' in data:
             if data.get('_type') == 'playlist' and not query.startswith('ytsearch'):
                 tracks_to_add = data['entries']
-                await ctx.send(f"Found playlist with {len(tracks_to_add)} songs.")
             else:
                 candidate_entries = [e for e in data['entries'] if isinstance(e, dict)]
                 chosen = await self._pick_playable_entry(candidate_entries)
@@ -891,7 +945,12 @@ class Music(commands.Cog):
             tracks_to_add = [data]
 
         if not tracks_to_add:
-            return await ctx.send("No songs found.")
+            # Fallback: plain-text searches can sometimes return unplayable top results.
+            fallback = await self._search_playable(query)
+            if fallback:
+                tracks_to_add = [fallback]
+            else:
+                return await ctx.send("No songs found.")
 
         added_count = 0
         for track in tracks_to_add:

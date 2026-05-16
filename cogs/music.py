@@ -62,19 +62,14 @@ def _make_vote_embed(
 # Custom Check
 def ensure_voice():
     async def predicate(ctx: commands.Context) -> bool:
-        # If the bot is already connected, allow queue/control commands even when the
-        # message author isn't in a voice channel (e.g. forwarded commands from another bot).
-        # If the author *is* in voice, still require them to be in the same channel.
-        if ctx.voice_client and getattr(ctx.voice_client, "channel", None):
-            if getattr(ctx.author, "voice", None) and ctx.author.voice:
-                if ctx.voice_client.channel != ctx.author.voice.channel:
-                    raise commands.CommandError(
-                        "You need to be in the same voice channel as the bot to use this command."
-                    )
-            return True
-
+        # Require the command author to be in a voice channel.
         if not getattr(ctx.author, "voice", None) or not ctx.author.voice:
             raise commands.CommandError("You need to be in a voice channel to use this command.")
+
+        # If the bot is already connected, require the author to be in the same channel.
+        if ctx.voice_client:
+            if ctx.voice_client.channel != ctx.author.voice.channel:
+                raise commands.CommandError("You need to be in the same voice channel as the bot to use this command.")
 
         return True
     return commands.check(predicate)

@@ -20,6 +20,11 @@ from cogs.extract_cache import ExtractInfoCache
 from cogs.guild_state import GuildStateManager, GuildState
 from cogs.perf_config import OptimizedFFmpegOptions
 
+# Hardcoded tuning for busy servers (adjust in code if needed).
+SEARCH_RESOLVE_MAX_RETRIES = 5
+SEARCH_RESOLVE_RETRY_DELAY_SEC = 3.0
+YTDLP_CONCURRENCY = 1
+
 def _votes_needed(vc: discord.VoiceProtocol) -> int:
     """Dynamic vote threshold based on non-bot members in the voice channel."""
     channel = getattr(vc, 'channel', None)
@@ -83,6 +88,7 @@ class Music(commands.Cog):
         # Throttle/batch noisy playback error chat messages.
         self._playback_error_buffers: Dict[int, List[str]] = {}
         self._playback_error_flush_tasks: Dict[int, asyncio.Task[None]] = {}
+        self._ytdlp_sema = asyncio.Semaphore(max(1, YTDLP_CONCURRENCY))
         self.youtube_auth_ready: bool = False
         self.yt_dlp_options: Dict[str, Any] = {
             'format': 'bestaudio/best',
@@ -99,6 +105,10 @@ class Music(commands.Cog):
             'no_warnings': True,
             'default_search': 'auto',
             'source_address': '0.0.0.0',
+            # More time for resolving/searching when many requests arrive at once.
+            'socket_timeout': 30,
+            'retries': 3,
+            'fragment_retries': 3,
         }
         
         # Check for cookies
@@ -421,9 +431,24 @@ class Music(commands.Cog):
                 return
 
         try:
-            filename = await self._resolve_stream_url(entry)
+            filename: Optional[str] = None
+            last_resolve_error: Optional[Exception] = None
+            for attempt in range(max(1, SEARCH_RESOLVE_MAX_RETRIES)):
+                try:
+                    filename = await self._resolve_stream_url(entry)
+                    if filename:
+                        break
+                except Exception as resolve_error:
+                    last_resolve_error = resolve_error
+
+                # Give yt-dlp/network a bit more breathing room when many requests arrive.
+                if attempt < SEARCH_RESOLVE_MAX_RETRIES - 1:
+                    await asyncio.sleep(SEARCH_RESOLVE_RETRY_DELAY_SEC)
+
             if not filename:
-                raise RuntimeError("Stream URL resolution failed")
+                raise RuntimeError(
+                    f"Stream URL resolution failed after {SEARCH_RESOLVE_MAX_RETRIES} attempt(s)"
+                ) from last_resolve_error
             
             state.current_song = entry
             state.start_time = time.time()
@@ -576,7 +601,8 @@ class Music(commands.Cog):
                 return None
 
         try:
-            data = await loop.run_in_executor(None, _extract_with_fallback)
+            async with self._ytdlp_sema:
+                data = await loop.run_in_executor(None, _extract_with_fallback)
             if data is not None:
                 self.cache.set(query, data)
             return data
@@ -1037,14 +1063,26 @@ class Music(commands.Cog):
     @ensure_voice()
     async def queue(self, ctx: commands.Context) -> None:
         state = self._get_state(ctx.guild.id)
+        current_title = None
+        if state.current_song and isinstance(state.current_song, dict):
+            current_title = state.current_song.get("title")
+
         if state.queue:
             queue_list = state.queue
-            view = QueuePaginationView(ctx, queue_list)
+            view = QueuePaginationView(ctx, queue_list, current_title=current_title)
             embed = view.get_embed()
             view.update_buttons()
             await ctx.send(embed=embed, view=view)
-        else:
-            await ctx.send("Queue is empty.")
+            return
+
+        if current_title:
+            embed = discord.Embed(title="Queue", color=discord.Color.blue())
+            embed.add_field(name="Now Playing", value=f"**{current_title}**", inline=False)
+            embed.add_field(name="Up Next", value="(empty)", inline=False)
+            await ctx.send(embed=embed)
+            return
+
+        await ctx.send("Queue is empty.")
 
     @commands.command(name='skip', aliases=['s', 'next'])
     @ensure_voice()
@@ -1320,21 +1358,33 @@ class MusicPlayerView(discord.ui.View):
     @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="music_queue")
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         state = self.cog._get_state(self.guild_id)
-        if state.queue:
-            queue_list = state.queue
-            max_lines = 10
-            queue_str = "\n".join([f"{i+1}. {entry['title']}" for i, entry in enumerate(queue_list[:max_lines])])
-            if len(queue_list) > max_lines:
-                queue_str += f"\n... and {len(queue_list) - max_lines} more."
-            await interaction.response.send_message(f"**Current Queue ({len(queue_list)} songs):**\n{queue_str}", ephemeral=True)
+        current_title = None
+        if state.current_song and isinstance(state.current_song, dict):
+            current_title = state.current_song.get("title")
+
+        queue_list = state.queue or []
+        max_lines = 10
+        upcoming = "\n".join([f"{i+1}. {entry.get('title', 'Unknown')}" for i, entry in enumerate(queue_list[:max_lines])])
+        if len(queue_list) > max_lines:
+            upcoming += f"\n... and {len(queue_list) - max_lines} more."
+
+        now_playing_line = f"**Now Playing:** {current_title}\n" if current_title else ""
+        if queue_list:
+            await interaction.response.send_message(
+                f"{now_playing_line}**Up Next ({len(queue_list)}):**\n{upcoming}",
+                ephemeral=True,
+            )
+        elif current_title:
+            await interaction.response.send_message(f"{now_playing_line}**Up Next:** (empty)", ephemeral=True)
         else:
             await interaction.response.send_message("Queue is empty.", ephemeral=True)
 
 class QueuePaginationView(discord.ui.View):
-    def __init__(self, ctx: commands.Context, queue_list: List[Dict[str, Any]]):
+    def __init__(self, ctx: commands.Context, queue_list: List[Dict[str, Any]], *, current_title: Optional[str] = None):
         super().__init__(timeout=60)
         self.ctx = ctx
         self.queue_list = queue_list
+        self.current_title = current_title
         self.current_page = 0
         self.items_per_page = 10
         self.total_pages = (len(queue_list) - 1) // self.items_per_page + 1
@@ -1359,7 +1409,9 @@ class QueuePaginationView(discord.ui.View):
         current_items = self.queue_list[start:end]
         
         queue_str = "\n".join([f"{start + i + 1}. {entry['title']}" for i, entry in enumerate(current_items)])
-        embed = discord.Embed(title=f"Current Queue ({len(self.queue_list)} songs)", description=queue_str, color=discord.Color.blue())
+        embed = discord.Embed(title=f"Up Next ({len(self.queue_list)} songs)", description=queue_str, color=discord.Color.blue())
+        if self.current_title:
+            embed.add_field(name="Now Playing", value=f"**{self.current_title}**", inline=False)
         embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages}")
         return embed
 

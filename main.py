@@ -78,6 +78,12 @@ class MusicBot(commands.Bot):
         print(f'Logged in as {self.user.name} ({self.user.id})')
         print('------')
 
+    async def process_commands(self, message):
+        if message.author == self.user:
+            return
+        ctx = await self.get_context(message)
+        await self.invoke(ctx)
+
     async def on_command_error(self, ctx, error):
         # Get context info
         user = f"{ctx.author} ({ctx.author.id})"

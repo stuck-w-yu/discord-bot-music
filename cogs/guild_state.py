@@ -30,6 +30,7 @@ class GuildState:
     
     # Message tracking
     last_np_msg_id: Optional[int] = None
+    last_status_msg_id: Optional[int] = None
     last_channel_id: Optional[int] = None
     
     # Cleanup

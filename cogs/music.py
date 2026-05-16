@@ -217,6 +217,43 @@ class Music(commands.Cog):
         # Load persistent queues
         self.load_queues()
 
+    async def _delete_last_status_message(self, guild_id: int) -> None:
+        state = self.states.get(guild_id)
+        if not state or not state.last_channel_id or not state.last_status_msg_id:
+            return
+
+        channel = self.bot.get_channel(state.last_channel_id)
+        if channel and isinstance(channel, discord.abc.Messageable):
+            try:
+                msg = await channel.fetch_message(state.last_status_msg_id)
+                # Don't delete the now-playing message.
+                if state.last_np_msg_id and msg.id == state.last_np_msg_id:
+                    return
+                await msg.delete()
+            except Exception:
+                pass
+        state.last_status_msg_id = None
+
+    async def _send_status(
+        self,
+        ctx: commands.Context,
+        *,
+        content: Optional[str] = None,
+        embed: Optional[discord.Embed] = None,
+        view: Optional[discord.ui.View] = None,
+    ) -> discord.Message:
+        """Send a single 'status' message per guild to avoid chat spam.
+
+        Deletes the previous status message (if any) but keeps the 'Now playing' message.
+        """
+        guild_id = ctx.guild.id
+        state = self._get_state(guild_id)
+        state.last_channel_id = ctx.channel.id
+        await self._delete_last_status_message(guild_id)
+        msg = await ctx.send(content=content, embed=embed, view=view)
+        state.last_status_msg_id = msg.id
+        return msg
+
     def _buffer_playback_error(self, guild_id: int, title: str) -> None:
         buf = self._playback_error_buffers.setdefault(guild_id, [])
         if title:
@@ -245,7 +282,10 @@ class Music(commands.Cog):
         more = max(0, len(unique) - len(shown))
         shown_text = ", ".join(f"**{t}**" for t in shown if isinstance(t, str))
         suffix = f" (+{more} lagi)" if more else ""
-        await channel.send(f"⚠️ Beberapa lagu gagal diputar dan dilewati: {shown_text}{suffix}.")
+        await self._delete_last_status_message(guild_id)
+        msg = await channel.send(f"⚠️ Beberapa lagu gagal diputar dan dilewati: {shown_text}{suffix}.")
+        if state:
+            state.last_status_msg_id = msg.id
 
     def _get_state(self, guild_id: int) -> GuildState:
         return self.states.get_or_create(guild_id)
@@ -506,9 +546,9 @@ class Music(commands.Cog):
                 await ctx.voice_client.move_to(channel)
             else:
                 await channel.connect()
-            await ctx.send(f'Joined {channel}')
+            await self._send_status(ctx, content=f'Joined {channel}')
         else:
-            await ctx.send('You are not in a voice channel!')
+            await self._send_status(ctx, content='You are not in a voice channel!')
 
     @commands.command(name='leave', aliases=['l', 'dc'])
     @ensure_voice()
@@ -523,9 +563,9 @@ class Music(commands.Cog):
                 state.reset_votes()
                 await state.cleanup_message(self.bot)
                 self._schedule_save_queues()
-            await ctx.send('Left the channel')
+            await self._send_status(ctx, content='Left the channel')
         else:
-            await ctx.send('I am not in a voice channel!')
+            await self._send_status(ctx, content='I am not in a voice channel!')
 
     @commands.command(name='loop', aliases=['lp'])
     @ensure_voice()
@@ -541,7 +581,8 @@ class Music(commands.Cog):
             elif mode in ['off', 'none', 'disable']:
                 new_state = 0
             else:
-                return await ctx.send("Invalid loop mode. Use `all`, `current`, or `off`.")
+                await self._send_status(ctx, content="Invalid loop mode. Use `all`, `current`, or `off`.")
+                return
         else:
             new_state = (current_state + 1) % 3
             
@@ -551,7 +592,7 @@ class Music(commands.Cog):
             msg = "Looping **Current Song** 🔂"
         elif new_state == 2:
             msg = "Looping **Queue** 🔁"
-        await ctx.send(msg)
+        await self._send_status(ctx, content=msg)
 
     async def _extract_info_async(self, query: str) -> Optional[Dict[str, Any]]:
         cached_data = self.cache.get(query)
@@ -838,11 +879,15 @@ class Music(commands.Cog):
     @ensure_voice()
     async def play(self, ctx: commands.Context, *, query: str) -> None:
         if not self.youtube_auth_ready:
-            return await ctx.send(
+            await self._send_status(
+                ctx,
+                content=(
                 "⚠️ **Playback Unavailable**\n"
                 "The bot is running in legacy mode and requires YouTube authentication, but no valid cookie file was found.\n"
                 "Please configure `YOUTUBE_COOKIES` or `cookies.txt` to enable playback."
+                ),
             )
+            return
             
         state = self._get_state(ctx.guild.id)
         state.last_channel_id = ctx.channel.id
@@ -851,14 +896,16 @@ class Music(commands.Cog):
                 if ctx.author.voice:
                     await ctx.author.voice.channel.connect()
                 else:
-                    return await ctx.send("You are not in a voice channel!")
+                    await self._send_status(ctx, content="You are not in a voice channel!")
+                    return
             except Exception as e:
-                return await ctx.send(f"Could not join channel: {e}")
+                await self._send_status(ctx, content=f"Could not join channel: {e}")
+                return
             
         loop = asyncio.get_event_loop()
 
         if "spotify.com" in query or "spotify:" in query:
-            await ctx.send("Spotify link detected. Fetching tracks...")
+            await self._send_status(ctx, content="Spotify link detected. Fetching tracks...")
             tracks_to_search = []
             spotify_error: Optional[str] = None
             
@@ -894,27 +941,33 @@ class Music(commands.Cog):
                 if fallback_queries:
                     tracks_to_search = fallback_queries
                     if len(fallback_queries) == 1:
-                        await ctx.send("Spotify API tidak tersedia, pakai fallback publik untuk track tunggal.")
+                        await self._send_status(ctx, content="Spotify API tidak tersedia, pakai fallback publik untuk track tunggal.")
                     else:
-                        await ctx.send(
-                            f"Spotify API tidak tersedia, pakai fallback publik playlist/album ({len(fallback_queries)} track ditemukan)."
+                        await self._send_status(
+                            ctx,
+                            content=f"Spotify API tidak tersedia, pakai fallback publik playlist/album ({len(fallback_queries)} track ditemukan).",
                         )
                 elif spotify_error:
-                    return await ctx.send(f"Error fetching Spotify data: {spotify_error}")
+                    await self._send_status(ctx, content=f"Error fetching Spotify data: {spotify_error}")
+                    return
                 elif not self.sp:
-                    return await ctx.send(
-                        "Spotify credentials tidak ditemukan, dan fallback publik tidak bisa membaca link Spotify ini."
+                    await self._send_status(
+                        ctx,
+                        content="Spotify credentials tidak ditemukan, dan fallback publik tidak bisa membaca link Spotify ini.",
                     )
+                    return
 
             if not tracks_to_search:
-                 return await ctx.send("No tracks found in Spotify link.")
+                 await self._send_status(ctx, content="No tracks found in Spotify link.")
+                 return
 
-            await ctx.send(f"Found {len(tracks_to_search)} tracks. Adding to queue...")
+            await self._send_status(ctx, content=f"Found {len(tracks_to_search)} tracks. Adding to queue...")
 
             first_query = tracks_to_search[0]
             track_data = await self._search_playable(first_query)
             if not track_data:
-                return await ctx.send(f"Could not find a playable YouTube result for **{first_query}**.")
+                await self._send_status(ctx, content=f"Could not find a playable YouTube result for **{first_query}**.")
+                return
 
             entry = {
                 'url': track_data.get('webpage_url'),
@@ -941,7 +994,7 @@ class Music(commands.Cog):
                 )
             if remaining:
                 self._schedule_save_queues()
-            await ctx.send(f"✅ Finished adding all {len(tracks_to_search)} Spotify tracks to queue.")
+            await self._send_status(ctx, content=f"✅ Finished adding all {len(tracks_to_search)} Spotify tracks to queue.")
             return
 
         # Avoid spamming chat with progress messages; results will be posted after resolution.
@@ -954,10 +1007,14 @@ class Music(commands.Cog):
             data = await self._extract_info_async(f"ytsearch1:{query}")
         
         if not data:
-            return await ctx.send(
-                "An error occurred or no songs found. "
-                "Try another keyword/title, or refresh YouTube cookies if this keeps happening."
+            await self._send_status(
+                ctx,
+                content=(
+                    "An error occurred or no songs found. "
+                    "Try another keyword/title, or refresh YouTube cookies if this keeps happening."
+                ),
             )
+            return
 
         tracks_to_add = []
         if 'entries' in data:
@@ -976,7 +1033,8 @@ class Music(commands.Cog):
             if fallback:
                 tracks_to_add = [fallback]
             else:
-                return await ctx.send("No songs found.")
+                await self._send_status(ctx, content="No songs found.")
+                return
 
         added_count = 0
         for track in tracks_to_add:
@@ -994,9 +1052,9 @@ class Music(commands.Cog):
         self._schedule_save_queues()
         
         if added_count == 1:
-            await ctx.send(f"Added to queue: **{tracks_to_add[0].get('title')}**")
+            await self._send_status(ctx, content=f"Added to queue: **{tracks_to_add[0].get('title')}**")
         else:
-            await ctx.send(f"Added **{added_count}** songs to queue.")
+            await self._send_status(ctx, content=f"Added **{added_count}** songs to queue.")
 
         if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
             await self.play_next(ctx)
@@ -1008,7 +1066,7 @@ class Music(commands.Cog):
             state = self._get_state(ctx.guild.id)
             ctx.voice_client.pause()
             state.pause_start = time.time()
-            await ctx.send("Paused ⏸️")
+            await self._send_status(ctx, content="Paused ⏸️")
 
     @commands.command(name='resume', aliases=['res'])
     @ensure_voice()
@@ -1021,13 +1079,14 @@ class Music(commands.Cog):
                 if state.start_time:
                     state.start_time += paused_duration
                 state.pause_start = None
-            await ctx.send("Resumed ▶️")
+            await self._send_status(ctx, content="Resumed ▶️")
 
     @commands.command(name='stop', aliases=['st'])
     @ensure_voice()
     async def stop(self, ctx: commands.Context) -> None:
         if not ctx.voice_client:
-            return await ctx.send("Not connected to a voice channel.")
+            await self._send_status(ctx, content="Not connected to a voice channel.")
+            return
             
         guild_id = ctx.guild.id
         state = self._get_state(guild_id)
@@ -1041,13 +1100,15 @@ class Music(commands.Cog):
             
         if not can_stop:
             if ctx.author.id in state.stop_votes:
-                return await ctx.send("You have already voted to stop.")
+                await self._send_status(ctx, content="You have already voted to stop.")
+                return
                 
             state.stop_votes.add(ctx.author.id)
             votes_needed = _votes_needed(ctx.voice_client) if ctx.voice_client else 3
             current_votes = len(state.stop_votes)
             if current_votes < votes_needed:
-                return await ctx.send(embed=_make_vote_embed("stop", current_votes, votes_needed, ctx.author))
+                await self._send_status(ctx, embed=_make_vote_embed("stop", current_votes, votes_needed, ctx.author))
+                return
                 
         ctx.voice_client.stop()
         state.queue.clear()
@@ -1057,7 +1118,7 @@ class Music(commands.Cog):
         await state.cleanup_message(self.bot)
         self._schedule_save_queues()
 
-        await ctx.send("⏹️ Stopped and cleared queue.")
+        await self._send_status(ctx, content="⏹️ Stopped and cleared queue.")
 
     @commands.command(name='queue', aliases=['q'])
     @ensure_voice()
@@ -1072,23 +1133,24 @@ class Music(commands.Cog):
             view = QueuePaginationView(ctx, queue_list, current_title=current_title)
             embed = view.get_embed()
             view.update_buttons()
-            await ctx.send(embed=embed, view=view)
+            await self._send_status(ctx, embed=embed, view=view)
             return
 
         if current_title:
             embed = discord.Embed(title="Queue", color=discord.Color.blue())
             embed.add_field(name="Now Playing", value=f"**{current_title}**", inline=False)
             embed.add_field(name="Up Next", value="(empty)", inline=False)
-            await ctx.send(embed=embed)
+            await self._send_status(ctx, embed=embed)
             return
 
-        await ctx.send("Queue is empty.")
+        await self._send_status(ctx, content="Queue is empty.")
 
     @commands.command(name='skip', aliases=['s', 'next'])
     @ensure_voice()
     async def skip(self, ctx: commands.Context, index: Optional[int] = None) -> None:
         if not ctx.voice_client or not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
-            return await ctx.send("Nothing is playing.")
+            await self._send_status(ctx, content="Nothing is playing.")
+            return
             
         guild_id = ctx.guild.id
         state = self._get_state(guild_id)
@@ -1102,26 +1164,30 @@ class Music(commands.Cog):
             
         if not can_skip:
             if ctx.author.id in state.skip_votes:
-                return await ctx.send("You have already voted to skip.")
+                await self._send_status(ctx, content="You have already voted to skip.")
+                return
             state.skip_votes.add(ctx.author.id)
             votes_needed = _votes_needed(ctx.voice_client) if ctx.voice_client else 3
             current_votes = len(state.skip_votes)
             if current_votes < votes_needed:
-                return await ctx.send(embed=_make_vote_embed("skip", current_votes, votes_needed, ctx.author))
+                await self._send_status(ctx, embed=_make_vote_embed("skip", current_votes, votes_needed, ctx.author))
+                return
                 
         if index is not None:
             if not state.queue:
-                return await ctx.send("Queue is empty, cannot skip to specific index.")
+                await self._send_status(ctx, content="Queue is empty, cannot skip to specific index.")
+                return
             if index < 1 or index > len(state.queue):
-                 return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(state.queue)}.")
+                 await self._send_status(ctx, content=f"Invalid index. Please provide a number between 1 and {len(state.queue)}.")
+                 return
             target_song = state.queue.pop(index-1)
             state.queue.insert(0, target_song)
             self._schedule_save_queues()
-            await ctx.send(f"⏭️ Skipping to **{target_song['title']}**...")
+            await self._send_status(ctx, content=f"⏭️ Skipping to **{target_song['title']}**...")
             ctx.voice_client.stop()
         else:
             ctx.voice_client.stop()
-            await ctx.send("⏭️ Skipped song.")
+            await self._send_status(ctx, content="⏭️ Skipped song.")
 
     @commands.command(name='remove', aliases=['r', 'rm'])
     @ensure_voice()
@@ -1130,11 +1196,13 @@ class Music(commands.Cog):
         guild_id = ctx.guild.id
         state = self._get_state(guild_id)
         if not state.queue:
-            return await ctx.send("Queue is empty.")
+            await self._send_status(ctx, content="Queue is empty.")
+            return
 
         tokens = target.strip().split()
         if not tokens:
-            return await ctx.send("Usage: `!remove <index>` or `!remove clear [index]`.")
+            await self._send_status(ctx, content="Usage: `!remove <index>` or `!remove clear [index]`.")
+            return
 
         first = tokens[0].lower()
 
@@ -1143,24 +1211,28 @@ class Music(commands.Cog):
                 removed_count = len(state.queue)
                 state.queue = []
                 self._schedule_save_queues()
-                return await ctx.send(f"🧹 Cleared queue ({removed_count} song(s)).")
+                await self._send_status(ctx, content=f"🧹 Cleared queue ({removed_count} song(s)).")
+                return
 
             if not tokens[1].isdigit():
-                return await ctx.send("Invalid index. Use a number after `clear`.")
+                await self._send_status(ctx, content="Invalid index. Use a number after `clear`.")
+                return
 
             index = int(tokens[1])
         else:
             if not first.isdigit():
-                return await ctx.send("Invalid syntax. Use `!remove <index>` or `!remove clear [index]`.")
+                await self._send_status(ctx, content="Invalid syntax. Use `!remove <index>` or `!remove clear [index]`.")
+                return
             index = int(first)
 
         queue = state.queue
         if index < 1 or index > len(queue):
-            return await ctx.send(f"Invalid index. Please provide a number between 1 and {len(queue)}.")
+            await self._send_status(ctx, content=f"Invalid index. Please provide a number between 1 and {len(queue)}.")
+            return
 
         removed = queue.pop(index - 1)
         self._schedule_save_queues()
-        await ctx.send(f"🗑️ Removed from queue: **{removed.get('title', 'Unknown Title')}**")
+        await self._send_status(ctx, content=f"🗑️ Removed from queue: **{removed.get('title', 'Unknown Title')}**")
 
     @commands.command(name='clear', aliases=['cq', 'clearqueue'])
     @ensure_voice()
@@ -1168,26 +1240,29 @@ class Music(commands.Cog):
         guild_id = ctx.guild.id
         state = self._get_state(guild_id)
         if not state.queue:
-            return await ctx.send("Queue is already empty.")
+            await self._send_status(ctx, content="Queue is already empty.")
+            return
 
         removed_count = len(state.queue)
         state.queue = []
         self._schedule_save_queues()
-        await ctx.send(f"🧹 Cleared queue ({removed_count} song(s)).")
+        await self._send_status(ctx, content=f"🧹 Cleared queue ({removed_count} song(s)).")
 
     @commands.command(name='volume', aliases=['v', 'vol'])
     @ensure_voice()
     async def volume(self, ctx: commands.Context, volume: int) -> None:
         if ctx.voice_client is None:
-            return await ctx.send("Not connected to a voice channel.")
+            await self._send_status(ctx, content="Not connected to a voice channel.")
+            return
         if volume < 0 or volume > 100:
-            return await ctx.send("Volume must be between 0 and 100.")
+            await self._send_status(ctx, content="Volume must be between 0 and 100.")
+            return
         state = self._get_state(ctx.guild.id)
         state.volume = volume / 100
         if ctx.voice_client.source:
             if hasattr(ctx.voice_client.source, 'volume'):
                 ctx.voice_client.source.volume = volume / 100
-        await ctx.send(f"🔊 Volume set to **{volume}%**")
+        await self._send_status(ctx, content=f"🔊 Volume set to **{volume}%**")
 
     @commands.command(name='nowplaying', aliases=['np', 'current'])
     @ensure_voice()
@@ -1195,7 +1270,8 @@ class Music(commands.Cog):
         guild_id = ctx.guild.id
         state = self._get_state(guild_id)
         if not state.current_song:
-            return await ctx.send("Nothing is currently playing.")
+            await self._send_status(ctx, content="Nothing is currently playing.")
+            return
             
         entry = state.current_song
         current_time = 0
@@ -1228,7 +1304,7 @@ class Music(commands.Cog):
         requester = ctx.guild.get_member(cast(int, requester_id)) if requester_id is not None else None
         req_name = requester.display_name if requester else "Unknown"
         embed.set_footer(text=f"Requested by {req_name}", icon_url=requester.display_avatar.url if requester else None)
-        await ctx.send(embed=embed)
+        await self._send_status(ctx, embed=embed)
 
 class MusicPlayerView(discord.ui.View):
     def __init__(self, cog: "Music", guild_id: int):

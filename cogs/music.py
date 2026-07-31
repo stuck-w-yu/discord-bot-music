@@ -1,5 +1,4 @@
 # pyright: reportGeneralTypeIssues=false, reportOptionalMemberAccess=false, reportOptionalSubscript=false, reportAttributeAccessIssue=false, reportReturnType=false
-
 import discord
 from discord.ext import commands
 import yt_dlp
@@ -11,19 +10,27 @@ import time
 import datetime
 import json
 import re
-import urllib.parse
-import urllib.request
 import base64
 from typing import Optional, Dict, List, Any, Set, cast, Union
 
 from cogs.extract_cache import ExtractInfoCache
 from cogs.guild_state import GuildStateManager, GuildState
 from cogs.perf_config import OptimizedFFmpegOptions
+from cogs.utils import (
+    ensure_voice,
+    spotify_track_url_from_query,
+    spotify_resource_id_from_query,
+    spotify_public_track_query,
+    spotify_public_collection_queries,
+    spotify_public_queries,
+    extract_info_with_ytdl
+)
 
 # Hardcoded tuning for busy servers (adjust in code if needed).
 SEARCH_RESOLVE_MAX_RETRIES = 5
 SEARCH_RESOLVE_RETRY_DELAY_SEC = 3.0
 YTDLP_CONCURRENCY = 1
+
 
 def _votes_needed(vc: discord.VoiceProtocol) -> int:
     """Dynamic vote threshold based on non-bot members in the voice channel."""
@@ -37,6 +44,7 @@ def _votes_needed(vc: discord.VoiceProtocol) -> int:
     if member_count <= 4:
         return 2
     return 3
+
 
 
 def _make_vote_embed(
@@ -62,23 +70,6 @@ def _make_vote_embed(
     embed.add_field(name="Voted by", value=voter.mention, inline=True)
     embed.set_footer(text=f"Need {remaining} more vote(s) to {action}")
     return embed
-
-
-# Custom Check
-def ensure_voice():
-    async def predicate(ctx: commands.Context) -> bool:
-        # Require the command author to be in a voice channel.
-        if not getattr(ctx.author, "voice", None) or not ctx.author.voice:
-            raise commands.CommandError("You need to be in a voice channel to use this command.")
-
-        # If the bot is already connected, require the author to be in the same channel.
-        if ctx.voice_client:
-            if ctx.voice_client.channel != ctx.author.voice.channel:
-                raise commands.CommandError("You need to be in the same voice channel as the bot to use this command.")
-
-        return True
-    return commands.check(predicate)
-
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot: commands.Bot = bot
@@ -595,61 +586,7 @@ class Music(commands.Cog):
         await self._send_status(ctx, content=msg)
 
     async def _extract_info_async(self, query: str) -> Optional[Dict[str, Any]]:
-        cached_data = self.cache.get(query)
-        if cached_data is not None:
-            return cached_data
-
-        loop = asyncio.get_event_loop()
-
-        def _extract_with_fallback() -> Optional[Dict[str, Any]]:
-            def _looks_like_url(value: str) -> bool:
-                return re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', value) is not None or value.startswith('www.')
-
-            try:
-                return self.ytdl.extract_info(query, download=False)
-            except Exception as primary_error:
-                message = str(primary_error)
-                # Some videos/playlists expose no matching stream for strict format selectors.
-                # Retry with relaxed options so search/metadata flow does not fail hard.
-                if 'Requested format is not available' in message:
-                    try:
-                        fallback_opts = dict(self.yt_dlp_options)
-                        fallback_opts.pop('format', None)
-                        fallback_opts.pop('extractaudio', None)
-                        fallback_opts.pop('audioformat', None)
-                        fallback_opts['skip_download'] = True
-                        fallback_opts['ignoreerrors'] = True
-                        fallback_opts['extractor_args'] = {
-                            'youtube': {
-                                'player_client': ['android', 'web', 'tv']
-                            }
-                        }
-                        with yt_dlp.YoutubeDL(fallback_opts) as fallback_ytdl:
-                            result = fallback_ytdl.extract_info(query, download=False)
-                            if result:
-                                return result
-
-                        # Extra fallback for plain-text search: use broader ytsearch so one broken
-                        # candidate does not cause complete failure.
-                        if not _looks_like_url(query) and not query.startswith('ytsearch:') and not query.startswith('ytsearch1:'):
-                            with yt_dlp.YoutubeDL(fallback_opts) as fallback_ytdl:
-                                return fallback_ytdl.extract_info(f"ytsearch5:{query}", download=False)
-                    except Exception as fallback_error:
-                        print(f"Fallback extract failed for {query}: {fallback_error}")
-                        return None
-
-                print(f"Failed to extract info for {query}: {primary_error}")
-                return None
-
-        try:
-            async with self._ytdlp_sema:
-                data = await loop.run_in_executor(None, _extract_with_fallback)
-            if data is not None:
-                self.cache.set(query, data)
-            return data
-        except Exception as e:
-            print(f"Failed to extract info for {query}: {e}")
-            return None
+        return await extract_info_with_ytdl(self.ytdl, query)
 
     async def _pick_playable_entry(self, entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Pick the first playable entry from search results.
@@ -702,178 +639,7 @@ class Music(commands.Cog):
                 return chosen
         return None
 
-    def _spotify_track_url_from_query(self, query: str) -> Optional[str]:
-        if "open.spotify.com/track/" in query:
-            track_part = query.split("open.spotify.com/track/", 1)[1]
-            track_id = track_part.split("?", 1)[0].split("/", 1)[0].strip()
-            if track_id:
-                return f"https://open.spotify.com/track/{track_id}"
-            return None
 
-        if query.startswith("spotify:track:"):
-            parts = query.split(":")
-            if len(parts) >= 3 and parts[2].strip():
-                return f"https://open.spotify.com/track/{parts[2].strip()}"
-
-        return None
-
-    def _spotify_resource_id_from_query(self, query: str, resource: str) -> Optional[str]:
-        web_token = f"open.spotify.com/{resource}/"
-        if web_token in query:
-            resource_part = query.split(web_token, 1)[1]
-            resource_id = resource_part.split("?", 1)[0].split("/", 1)[0].strip()
-            return resource_id or None
-
-        uri_token = f"spotify:{resource}:"
-        if query.startswith(uri_token):
-            parts = query.split(":")
-            if len(parts) >= 3 and parts[2].strip():
-                return parts[2].strip()
-
-        return None
-
-    async def _spotify_public_track_query(self, query: str) -> Optional[str]:
-        # Public fallback without Spotify API key; only supports single track links.
-        track_url = self._spotify_track_url_from_query(query)
-        if not track_url:
-            return None
-
-        oembed_url = f"https://open.spotify.com/oembed?url={urllib.parse.quote(track_url, safe='')}"
-        loop = asyncio.get_event_loop()
-
-        def fetch_title() -> Optional[str]:
-            try:
-                req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
-                title = payload.get("title")
-                if isinstance(title, str) and title.strip():
-                    return title.strip()
-            except Exception:
-                return None
-            return None
-
-        return await loop.run_in_executor(None, fetch_title)
-
-    async def _spotify_public_collection_queries(self, query: str) -> List[str]:
-        # Scrape playlist/album page data as a best-effort fallback when Spotify API is unavailable.
-        resource = "playlist" if "playlist" in query else "album" if "album" in query else None
-        if not resource:
-            return []
-
-        resource_id = self._spotify_resource_id_from_query(query, resource)
-        if not resource_id:
-            return []
-
-        public_url = f"https://open.spotify.com/{resource}/{resource_id}"
-        loop = asyncio.get_event_loop()
-
-        def fetch_queries() -> List[str]:
-            try:
-                req = urllib.request.Request(
-                    public_url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0",
-                        "Accept-Language": "en-US,en;q=0.9",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=15) as response:
-                    html = response.read().decode("utf-8", errors="ignore")
-
-                next_data_match = re.search(
-                    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-                    html,
-                    flags=re.DOTALL,
-                )
-                if not next_data_match:
-                    return []
-
-                payload = json.loads(next_data_match.group(1))
-                queries: List[str] = []
-
-                def walk(node: Any) -> None:
-                    if isinstance(node, dict):
-                        name_raw = node.get("name")
-                        uri_raw = node.get("uri")
-                        type_raw = node.get("type")
-                        artists_raw = node.get("artists")
-
-                        if isinstance(name_raw, str) and name_raw.strip():
-                            is_track = (
-                                (isinstance(uri_raw, str) and uri_raw.startswith("spotify:track:"))
-                                or type_raw == "track"
-                            )
-                            if is_track:
-                                title = name_raw.strip()
-                                artist = ""
-                                if isinstance(artists_raw, list) and artists_raw:
-                                    first_artist = artists_raw[0]
-                                    if isinstance(first_artist, dict):
-                                        first_name = first_artist.get("name")
-                                        if isinstance(first_name, str):
-                                            artist = first_name.strip()
-
-                                if artist and artist.lower() not in title.lower():
-                                    queries.append(f"{artist} - {title}")
-                                else:
-                                    queries.append(title)
-
-                        for value in node.values():
-                            walk(value)
-                        return
-
-                    if isinstance(node, list):
-                        for item in node:
-                            walk(item)
-
-                walk(payload)
-                deduped = list(dict.fromkeys(queries))
-                return deduped[:200]
-            except Exception:
-                return []
-
-        return await loop.run_in_executor(None, fetch_queries)
-
-    async def _spotify_public_queries(self, query: str) -> List[str]:
-        # Best-effort fallback without Spotify API key.
-        # For track links, use oEmbed title. For playlist/album, try yt-dlp first then page scraping.
-        track_query = await self._spotify_public_track_query(query)
-        if track_query:
-            return [track_query]
-
-        data = await self._extract_info_async(query)
-        if not data:
-            if "playlist" in query or "album" in query:
-                return await self._spotify_public_collection_queries(query)
-            return []
-
-        entries: List[Dict[str, Any]] = []
-        if isinstance(data, dict) and 'entries' in data and data['entries']:
-            entries = [e for e in data['entries'] if isinstance(e, dict)]
-        elif isinstance(data, dict):
-            entries = [data]
-
-        queries: List[str] = []
-        for entry in entries:
-            title = (entry.get('track') or entry.get('title') or '').strip()
-            artist = (entry.get('artist') or entry.get('uploader') or '').strip()
-            if not title:
-                continue
-
-            if artist and artist.lower() not in title.lower():
-                queries.append(f"{artist} - {title}")
-            else:
-                queries.append(title)
-
-        # De-duplicate while preserving order.
-        deduped = list(dict.fromkeys(queries))
-        if deduped:
-            return deduped
-
-        if "playlist" in query or "album" in query:
-            return await self._spotify_public_collection_queries(query)
-
-        return deduped
 
     @commands.command(name='play', aliases=['p'])
     @ensure_voice()
@@ -937,7 +703,7 @@ class Music(commands.Cog):
                     spotify_error = str(e)
 
             if not tracks_to_search:
-                fallback_queries = await self._spotify_public_queries(query)
+                fallback_queries = await spotify_public_queries(query)
                 if fallback_queries:
                     tracks_to_search = fallback_queries
                     if len(fallback_queries) == 1:

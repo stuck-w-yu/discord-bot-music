@@ -13,8 +13,6 @@ load_dotenv(dotenv_path='environment/.env', override=False)
 static_ffmpeg.add_paths()
 
 TOKEN = os.getenv('DISCORD_TOKEN')
-SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
 
 
 def _cookies_configured() -> bool:

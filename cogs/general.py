@@ -158,12 +158,30 @@ class General(commands.Cog):
             "`!setname (nick)` - Ganti nama bot\n"
             "`!resetname` - Reset nama bot\n"
             "`!ping` - Cek latency\n"
-            "`!svlogs (serverstats)` - Cek statistik server"
+            "`!svlogs (serverstats)` - Cek statistik server\n"
+            "`!dm <user_id> <pesan>` - Kirim DM ke user (Admin)"
         )
         embed.add_field(name="⚙️ General", value=general_cmds, inline=False)
         
         embed.set_footer(text="Dibuat dengan kebanggaan oleh, Wahyu Firmansyah")
         await ctx.send(embed=embed)
+
+    @commands.command(name='dm')
+    async def dm(self, ctx, user_id: int, *, message: str):
+        """Sends a direct message to a user by their ID (Owner only)."""
+        if ctx.author.id not in [737579270083182632, 392647469541883907]:
+            return await ctx.send("🚫 Anda tidak memiliki izin untuk menggunakan perintah ini.")
+        try:
+            user = await self.bot.fetch_user(user_id)
+            if not user:
+                return await ctx.send("❌ User tidak ditemukan.")
+            
+            await user.send(message)
+            await ctx.send(f"✅ Pesan berhasil dikirim ke **{user.name}** (ID: {user_id})")
+        except discord.Forbidden:
+            await ctx.send(f"❌ Gagal mengirim pesan. User memblokir DM dari bot.")
+        except Exception as e:
+            await ctx.send(f"❌ Terjadi kesalahan: {e}")
 
 async def setup(bot):
     await bot.add_cog(General(bot))

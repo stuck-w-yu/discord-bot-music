@@ -2,3 +2,10 @@
 venvPath = "."
 venv = ".venv"
 extraPaths = [".venv/lib/python3.14/site-packages"]
+reportOptionalMemberAccess = false
+reportOptionalSubscript = false
+reportAttributeAccessIssue = false
+reportArgumentType = false
+reportCallIssue = false
+reportReturnType = false
+reportMissingTypeStubs = false

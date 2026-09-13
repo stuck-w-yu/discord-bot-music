@@ -63,7 +63,7 @@ class General(commands.Cog):
         """Displays server system statistics."""
         # Check if psutil is available
         try:
-            import psutil
+            import psutil  # type: ignore
         except ImportError:
             return await ctx.send("❌ Error: `psutil` library is not installed. Please install it using `pip install psutil`.")
 

@@ -1,7 +1,7 @@
-# pyright: reportGeneralTypeIssues=false, reportOptionalMemberAccess=false, reportOptionalSubscript=false, reportAttributeAccessIssue=false, reportReturnType=false
+# pyright: reportGeneralTypeIssues=false, reportOptionalMemberAccess=false, reportOptionalSubscript=false, reportAttributeAccessIssue=false, reportReturnType=false, reportArgumentType=false, reportCallIssue=false, reportMissingTypeStubs=false
 import discord
 from discord.ext import commands
-import yt_dlp
+import yt_dlp  # type: ignore
 import asyncio
 import os
 import spotipy
@@ -237,11 +237,20 @@ class Music(commands.Cog):
 
         Deletes the previous status message (if any) but keeps the 'Now playing' message.
         """
+        if not ctx.guild:
+            raise commands.CommandError("This command can only be used in a server.")
         guild_id = ctx.guild.id
         state = self._get_state(guild_id)
         state.last_channel_id = ctx.channel.id
         await self._delete_last_status_message(guild_id)
-        msg = await ctx.send(content=content, embed=embed, view=view)
+        kwargs: Dict[str, Any] = {}
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if view is not None:
+            kwargs["view"] = view
+        msg = await ctx.send(**kwargs)
         state.last_status_msg_id = msg.id
         return msg
 

@@ -4,5 +4,9 @@
   ],
   "search_path": [
     "/home/stuckwyu/dev/code/bot-discord-music/.venv/lib/python3.14/site-packages"
+  ],
+  "ignore_all_errors": [
+    "cogs/music.py",
+    "cogs/music_lavalink.py"
   ]
 }

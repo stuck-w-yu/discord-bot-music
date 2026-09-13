@@ -17,7 +17,9 @@ from cogs.utils import (
     spotify_resource_id_from_query,
     spotify_public_track_query,
     spotify_public_collection_queries,
-    spotify_public_queries
+    spotify_public_queries,
+    get_autoplay_recommendations,
+    extract_youtube_video_id,
 )
 
 
@@ -167,14 +169,50 @@ class MusicLavalink(commands.Cog):
         if player.playing or player.paused:
             return
 
+        state = self.states.get_or_create(guild_id)
+
         if player.queue.is_empty:
-            state = self.states.get_or_create(guild_id)
-            state.current_song = None
-            return
+            if state.autoplay:
+                if hasattr(player, "auto_queue") and not player.auto_queue.is_empty:
+                    auto_track = player.auto_queue.get()
+                    await player.queue.put_wait(auto_track)
+                else:
+                    seed_item = state.current_song or (state.track_history[-1] if state.track_history else None)
+                    seed_query: Optional[str] = None
+                    seed_title: Optional[str] = None
+
+                    if seed_item:
+                        seed_query = (
+                            getattr(seed_item, "identifier", None)
+                            or getattr(seed_item, "uri", None)
+                            or getattr(seed_item, "title", None)
+                        )
+                        seed_title = getattr(seed_item, "title", None)
+                        if isinstance(seed_item, dict):
+                            seed_query = seed_item.get("videoId") or seed_item.get("title")
+                            seed_title = seed_item.get("title")
+
+                    if seed_query:
+                        recs = await get_autoplay_recommendations(
+                            seed=seed_query,
+                            limit=3,
+                            exclude_ids=state.played_ids,
+                        )
+                        for rec in recs:
+                            playable = await self._search_single_track(rec["url"])
+                            if playable:
+                                playable.extras = {"is_autoplay": True, "seed_title": seed_title}
+                                await player.queue.put_wait(playable)
+                                if rec.get("videoId"):
+                                    state.played_ids.add(rec["videoId"])
+
+            if player.queue.is_empty:
+                state.current_song = None
+                return
 
         track = player.queue.get()
-        state = self.states.get_or_create(guild_id)
         state.current_song = track
+        state.add_to_history(track)
         state.skip_votes.clear()
         state.stop_votes.clear()
         await player.play(track, volume=int(state.volume * 100))
@@ -199,7 +237,19 @@ class MusicLavalink(commands.Cog):
                 if loop_mode == 1: loop_msg = "🔂 Loop Current"
                 elif loop_mode == 2: loop_msg = "🔁 Loop All"
 
-                msg = await channel.send(f"Now playing: **{track.title}** {loop_msg}", view=view)
+                is_autoplay = False
+                seed_title = None
+                if hasattr(track, "extras") and isinstance(track.extras, dict):
+                    is_autoplay = track.extras.get("is_autoplay", False)
+                    seed_title = track.extras.get("seed_title")
+                elif getattr(track, "_recommended", False):
+                    is_autoplay = True
+
+                ap_msg = ""
+                if is_autoplay:
+                    ap_msg = f" 📻 *(Autoplay via {seed_title})*" if seed_title else " 📻 *(Autoplay)*"
+
+                msg = await channel.send(f"Now playing: **{track.title}**{ap_msg} {loop_msg}", view=view)
                 state.last_np_msg_id = msg.id
 
     @commands.Cog.listener()
@@ -314,6 +364,9 @@ class MusicLavalink(commands.Cog):
                         except Exception:
                             pass
                         await player.queue.put_wait(track)
+                        if ctx.guild:
+                            st = self.states.get_or_create(ctx.guild.id)
+                            st.add_to_history(track)
                         added_count += 1
 
             # Resolve first track separately to start playing immediately
@@ -324,6 +377,9 @@ class MusicLavalink(commands.Cog):
                 except Exception:
                     pass
                 await player.queue.put_wait(first_track)
+                if ctx.guild:
+                    st = self.states.get_or_create(ctx.guild.id)
+                    st.add_to_history(first_track)
                 added_count += 1
                 await self._start_next(ctx.guild.id, player)
 
@@ -348,6 +404,9 @@ class MusicLavalink(commands.Cog):
                 except Exception:
                     pass
                 await player.queue.put_wait(track)
+                if ctx.guild:
+                    st = self.states.get_or_create(ctx.guild.id)
+                    st.add_to_history(track)
 
             await ctx.send(f"Added playlist **{result.name}** with **{len(result.tracks)}** songs.")
         else:
@@ -357,6 +416,9 @@ class MusicLavalink(commands.Cog):
             except Exception:
                 pass
             await player.queue.put_wait(track)
+            if ctx.guild:
+                st = self.states.get_or_create(ctx.guild.id)
+                st.add_to_history(track)
             await ctx.send(f"Added to queue: **{track.title}**")
 
         await self._start_next(ctx.guild.id, player)
@@ -406,6 +468,42 @@ class MusicLavalink(commands.Cog):
             msg = "Looping **Current Song** 🔂"
         elif new_state == 2:
             msg = "Looping **Queue** 🔁"
+        await ctx.send(msg)
+
+    @commands.command(name="autoplay", aliases=["ap"])
+    @ensure_voice()
+    async def autoplay(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
+        if not ctx.guild:
+            return
+
+        state = self.states.get_or_create(ctx.guild.id)
+        if mode:
+            mode = mode.lower()
+            if mode in ["on", "enable", "true", "1"]:
+                state.autoplay = True
+            elif mode in ["off", "disable", "false", "0"]:
+                state.autoplay = False
+            else:
+                await ctx.send("Gunakan `!autoplay on` atau `!autoplay off`.")
+                return
+        else:
+            state.autoplay = not state.autoplay
+
+        player = ctx.voice_client
+        if isinstance(player, wavelink.Player):
+            try:
+                player.autoplay = (
+                    wavelink.AutoPlayMode.enabled if state.autoplay else wavelink.AutoPlayMode.disabled
+                )
+            except Exception:
+                pass
+
+        status_str = "diaktifkan 📻" if state.autoplay else "dinonaktifkan ⏹️"
+        msg = f"Autoplay **{status_str}**. "
+        if state.autoplay:
+            msg += "Lagu rekomendasi akan otomatis diputar saat antrean habis."
+        else:
+            msg += "Pemutaran akan berhenti saat antrean habis."
         await ctx.send(msg)
 
     @commands.command(name="stop", aliases=["st"])
@@ -751,6 +849,24 @@ class MusicPlayerView(discord.ui.View):
         if len(queue_items) > max_lines:
             queue_str += f"\n... and {len(queue_items) - max_lines} more."
         await interaction.response.send_message(f"**Current Queue ({len(queue_items)} songs):**\n{queue_str}", ephemeral=True)
+
+    @discord.ui.button(label="📻 Autoplay", style=discord.ButtonStyle.secondary, custom_id="lavalink_autoplay", row=1)
+    async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not interaction.guild:
+            return
+        state = self.cog.states.get_or_create(interaction.guild.id)
+        state.autoplay = not state.autoplay
+        player = interaction.guild.voice_client
+        if isinstance(player, wavelink.Player):
+            try:
+                player.autoplay = (
+                    wavelink.AutoPlayMode.enabled if state.autoplay else wavelink.AutoPlayMode.disabled
+                )
+            except Exception:
+                pass
+        status_text = "diaktifkan 📻" if state.autoplay else "dinonaktifkan ⏹️"
+        button.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
+        await interaction.response.send_message(f"Autoplay {status_text}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

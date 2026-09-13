@@ -33,9 +33,30 @@ class GuildState:
     last_status_msg_id: Optional[int] = None
     last_channel_id: Optional[int] = None
 
+    # Autoplay and history
+    autoplay: bool = False
+    track_history: list = field(default_factory=list)
+    played_ids: Set[str] = field(default_factory=set)
+
     # Lifecycle state
     is_cleaning_up: bool = False
     
+    def add_to_history(self, item: Any) -> None:
+        """Add a track/entry to recent history and record its identifier."""
+        if not item:
+            return
+        self.track_history.append(item)
+        if len(self.track_history) > 25:
+            self.track_history.pop(0)
+
+        ident = None
+        if isinstance(item, dict):
+            ident = item.get('id') or item.get('videoId') or item.get('url') or item.get('title')
+        else:
+            ident = getattr(item, 'identifier', None) or getattr(item, 'title', None) or getattr(item, 'uri', None)
+        if ident:
+            self.played_ids.add(str(ident))
+
     def reset_votes(self) -> None:
         """Clear all voting state for fresh track."""
         self.pause_votes.clear()
@@ -97,6 +118,8 @@ class GuildStateManager:
             state.queue.clear()
             state.current_song = None
             state.reset_votes()
+            state.track_history.clear()
+            state.played_ids.clear()
     
     async def cleanup_all(self) -> None:
         """Clean up all guild states."""

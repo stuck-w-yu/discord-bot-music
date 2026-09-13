@@ -23,7 +23,9 @@ from cogs.utils import (
     spotify_public_track_query,
     spotify_public_collection_queries,
     spotify_public_queries,
-    extract_info_with_ytdl
+    extract_info_with_ytdl,
+    get_autoplay_recommendations,
+    extract_youtube_video_id,
 )
 
 # Hardcoded tuning for busy servers (adjust in code if needed).
@@ -466,7 +468,58 @@ class Music(commands.Cog):
             if state.queue:
                 entry = state.queue.pop(0)
                 self._schedule_save_queues()
-            else:
+            elif state.autoplay:
+                seed_item = previous_song or (state.track_history[-1] if state.track_history else None)
+                seed_query: Optional[str] = None
+                seed_title: Optional[str] = None
+
+                if isinstance(seed_item, dict):
+                    seed_query = (
+                        seed_item.get('videoId')
+                        or seed_item.get('id')
+                        or extract_youtube_video_id(seed_item.get('url'))
+                        or seed_item.get('search_query')
+                        or seed_item.get('title')
+                    )
+                    seed_title = seed_item.get('title')
+                elif seed_item:
+                    seed_query = str(seed_item)
+                    seed_title = str(seed_item)
+
+                if seed_query:
+                    recs = await get_autoplay_recommendations(
+                        seed=seed_query,
+                        limit=3,
+                        exclude_ids=state.played_ids,
+                    )
+                    if recs:
+                        first_rec = recs[0]
+                        entry = {
+                            'url': first_rec['url'],
+                            'stream_url': None,
+                            'title': first_rec['title'],
+                            'duration': first_rec.get('duration'),
+                            'thumbnail': first_rec.get('thumbnail'),
+                            'requester_id': self.bot.user.id if self.bot.user else None,
+                            'is_autoplay': True,
+                            'seed_title': seed_title,
+                        }
+                        for next_rec in recs[1:]:
+                            state.queue.append({
+                                'url': next_rec['url'],
+                                'stream_url': None,
+                                'title': next_rec['title'],
+                                'duration': next_rec.get('duration'),
+                                'thumbnail': next_rec.get('thumbnail'),
+                                'requester_id': self.bot.user.id if self.bot.user else None,
+                                'is_autoplay': True,
+                                'seed_title': seed_title,
+                            })
+                            if next_rec.get('videoId'):
+                                state.played_ids.add(next_rec['videoId'])
+                        self._schedule_save_queues()
+
+            if not entry:
                 state.current_song = None
                 return
 
@@ -491,6 +544,7 @@ class Music(commands.Cog):
                 ) from last_resolve_error
             
             state.current_song = entry
+            state.add_to_history(entry)
             state.start_time = time.time()
             state.clear_pause_state()
             state.reset_votes()
@@ -527,7 +581,11 @@ class Music(commands.Cog):
                                  pass
 
                          title = entry.get('title', 'Unknown Title')
-                         msg = await channel.send(f'Now playing: **{title}** {loop_msg}', view=view)
+                         ap_msg = ""
+                         if entry.get('is_autoplay'):
+                             st = entry.get('seed_title')
+                             ap_msg = f" 📻 *(Autoplay via {st})*" if st else " 📻 *(Autoplay)*"
+                         msg = await channel.send(f'Now playing: **{title}**{ap_msg} {loop_msg}', view=view)
                          state.last_np_msg_id = msg.id
             
         except Exception as e:
@@ -592,6 +650,30 @@ class Music(commands.Cog):
             msg = "Looping **Current Song** 🔂"
         elif new_state == 2:
             msg = "Looping **Queue** 🔁"
+        await self._send_status(ctx, content=msg)
+
+    @commands.command(name='autoplay', aliases=['ap'])
+    @ensure_voice()
+    async def autoplay(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
+        state = self._get_state(ctx.guild.id)
+        if mode:
+            mode = mode.lower()
+            if mode in ['on', 'enable', 'true', '1']:
+                state.autoplay = True
+            elif mode in ['off', 'disable', 'false', '0']:
+                state.autoplay = False
+            else:
+                await self._send_status(ctx, content="Gunakan `!autoplay on` atau `!autoplay off`.")
+                return
+        else:
+            state.autoplay = not state.autoplay
+
+        status_str = "diaktifkan 📻" if state.autoplay else "dinonaktifkan ⏹️"
+        msg = f"Autoplay **{status_str}**. "
+        if state.autoplay:
+            msg += "Lagu rekomendasi akan otomatis diputar saat antrean habis."
+        else:
+            msg += "Pemutaran akan berhenti saat antrean habis."
         await self._send_status(ctx, content=msg)
 
     async def _extract_info_async(self, query: str) -> Optional[Dict[str, Any]]:
@@ -753,6 +835,7 @@ class Music(commands.Cog):
                 'requester_id': ctx.author.id,
             }
             state.queue.append(entry)
+            state.add_to_history(entry)
             self._schedule_save_queues()
             
             if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
@@ -760,13 +843,13 @@ class Music(commands.Cog):
 
             remaining = tracks_to_search[1:]
             for search_query in remaining:
-                state.queue.append(
-                    {
-                        'search_query': search_query,
-                        'title': search_query,
-                        'requester_id': ctx.author.id,
-                    }
-                )
+                sp_entry = {
+                    'search_query': search_query,
+                    'title': search_query,
+                    'requester_id': ctx.author.id,
+                }
+                state.queue.append(sp_entry)
+                state.add_to_history(sp_entry)
             if remaining:
                 self._schedule_save_queues()
             await self._send_status(ctx, content=f"✅ Finished adding all {len(tracks_to_search)} Spotify tracks to queue.")
@@ -831,6 +914,7 @@ class Music(commands.Cog):
                 'requester_id': ctx.author.id
             }
             state.queue.append(entry)
+            state.add_to_history(entry)
             added_count += 1
         
         self._schedule_save_queues()
@@ -1243,6 +1327,14 @@ class MusicPlayerView(discord.ui.View):
             await interaction.response.send_message(f"{now_playing_line}**Up Next:** (empty)", ephemeral=True)
         else:
             await interaction.response.send_message("Queue is empty.", ephemeral=True)
+
+    @discord.ui.button(label="📻 Autoplay", style=discord.ButtonStyle.secondary, custom_id="music_autoplay", row=1)
+    async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        state = self.cog._get_state(self.guild_id)
+        state.autoplay = not state.autoplay
+        status_text = "diaktifkan 📻" if state.autoplay else "dinonaktifkan ⏹️"
+        button.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
+        await interaction.response.send_message(f"Autoplay {status_text}", ephemeral=True)
 
 class QueuePaginationView(discord.ui.View):
     def __init__(self, ctx: commands.Context, queue_list: List[Dict[str, Any]], *, current_title: Optional[str] = None):

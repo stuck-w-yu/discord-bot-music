@@ -4,7 +4,7 @@ import urllib.parse
 import urllib.request
 import asyncio
 import yt_dlp  # type: ignore
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Set
 
 import discord
 from discord.ext import commands
@@ -260,3 +260,134 @@ async def extract_info_with_ytdl(ytdl, query: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"Failed to extract info for {query}: {e}")
         return None
+
+
+def extract_youtube_video_id(url_or_id: Optional[str]) -> Optional[str]:
+    """Extract an 11-character YouTube video ID from a URL or raw ID string."""
+    if not url_or_id:
+        return None
+    cleaned = url_or_id.strip()
+    if len(cleaned) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', cleaned):
+        return cleaned
+    match = re.search(r'(?:v=|\/embed\/|youtu\.be\/|\/v\/|\/shorts\/)([a-zA-Z0-9_-]{11})', cleaned)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _parse_duration_str(duration_str: Optional[str]) -> Optional[int]:
+    """Parse 'MM:SS' or 'HH:MM:SS' duration string into seconds."""
+    if not duration_str:
+        return None
+    parts = duration_str.split(':')
+    try:
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        elif len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
+async def get_autoplay_recommendations(
+    seed: str,
+    limit: int = 5,
+    exclude_ids: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch recommended tracks from YouTube Music based on a seed (video ID, URL, or song title).
+    Uses ytmusicapi with IPv4 connection optimization.
+    """
+    if not seed:
+        return []
+
+    exclude: Set[str] = set(exclude_ids) if exclude_ids else set()
+
+    def _fetch_sync() -> List[Dict[str, Any]]:
+        try:
+            # Force IPv4 in urllib3 to avoid long IPv6 SYN timeouts on hosts without IPv6 routing
+            try:
+                import socket
+                import urllib3.util.connection as urllib3_conn
+                urllib3_conn.allowed_gai_family = lambda: socket.AF_INET
+            except Exception:
+                pass
+
+            from ytmusicapi import YTMusic
+            ytm = YTMusic()
+
+            vid = extract_youtube_video_id(seed)
+            if not vid:
+                # If seed is not a video ID or youtube URL, search for the song first
+                search_res = ytm.search(seed, filter='songs')
+                if search_res and isinstance(search_res, list):
+                    first_item = search_res[0]
+                    if isinstance(first_item, dict):
+                        vid = first_item.get('videoId')
+
+            if not vid:
+                return []
+
+            # Add the seed itself to exclude set so we don't repeat it
+            exclude.add(vid)
+
+            watch_res = ytm.get_watch_playlist(videoId=vid, limit=max(limit * 3, 10))
+            if not watch_res or not isinstance(watch_res, dict):
+                return []
+
+            raw_tracks = watch_res.get('tracks')
+            if not isinstance(raw_tracks, list):
+                return []
+            recommendations: List[Dict[str, Any]] = []
+
+            for track in raw_tracks:
+                if not isinstance(track, dict):
+                    continue
+
+                track_vid = track.get('videoId')
+                if not track_vid or track_vid in exclude:
+                    continue
+
+                title = track.get('title') or 'Unknown Title'
+                artist_objs = track.get('artists')
+                artist_names = [a.get('name', '') for a in artist_objs if isinstance(a, dict) and a.get('name')] if isinstance(artist_objs, list) else []
+                artist_str = ', '.join(artist_names)
+
+                display_title = title
+                if artist_str and artist_str.lower() not in title.lower():
+                    display_title = f"{title} - {artist_str}"
+
+                duration = _parse_duration_str(track.get('length'))
+                thumbnails = track.get('thumbnail')
+                thumbnail_url = None
+                if isinstance(thumbnails, list) and thumbnails:
+                    last_thumb = thumbnails[-1]
+                    if isinstance(last_thumb, dict):
+                        thumbnail_url = last_thumb.get('url')
+
+                rec_item = {
+                    'id': track_vid,
+                    'videoId': track_vid,
+                    'title': display_title,
+                    'song_title': title,
+                    'artist': artist_str,
+                    'duration': duration,
+                    'url': f"https://www.youtube.com/watch?v={track_vid}",
+                    'webpage_url': f"https://www.youtube.com/watch?v={track_vid}",
+                    'thumbnail': thumbnail_url,
+                    'is_autoplay': True,
+                }
+                recommendations.append(rec_item)
+                exclude.add(track_vid)
+
+                if len(recommendations) >= limit:
+                    break
+
+            return recommendations
+        except Exception as err:
+            print(f"Failed to fetch autoplay recommendations for seed '{seed}': {err}")
+            return []
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _fetch_sync)

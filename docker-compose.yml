@@ -15,7 +15,11 @@ services:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml
 
   bot:
-    build: .
+    build:
+      context: .
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     restart: always
     depends_on:
       - lavalink

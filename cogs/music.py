@@ -782,15 +782,22 @@ class Music(commands.Cog):
             )
             return
 
+        # Determine if query is an explicit playlist URL
+        is_playlist = (
+            data.get('_type') == 'playlist'
+            and is_url_like
+            and ('list=' in query or '/playlist' in query or 'album' in query)
+        )
+
         tracks_to_add = []
         if 'entries' in data:
-            if data.get('_type') == 'playlist' and not query.startswith('ytsearch'):
-                tracks_to_add = data['entries']
+            if is_playlist:
+                tracks_to_add = [e for e in data['entries'] if isinstance(e, dict)]
             else:
                 candidate_entries = [e for e in data['entries'] if isinstance(e, dict)]
                 chosen = await self._pick_playable_entry(candidate_entries)
                 tracks_to_add = [chosen] if chosen else []
-        else:
+        elif isinstance(data, dict):
             tracks_to_add = [data]
 
         if not tracks_to_add:
@@ -804,6 +811,8 @@ class Music(commands.Cog):
 
         added_count = 0
         for track in tracks_to_add:
+            if not isinstance(track, dict):
+                continue
             entry = {
                 'url': track.get('original_url') or track.get('webpage_url') or track.get('url'),
                 'stream_url': track.get('url'),
@@ -818,9 +827,14 @@ class Music(commands.Cog):
         self._schedule_save_queues()
         
         if added_count == 1:
-            await self._send_status(ctx, content=f"Added to queue: **{tracks_to_add[0].get('title')}**")
-        else:
+            first_track = tracks_to_add[0] if tracks_to_add and isinstance(tracks_to_add[0], dict) else {}
+            title = first_track.get('title', 'Unknown Title')
+            await self._send_status(ctx, content=f"Added to queue: **{title}**")
+        elif added_count > 1:
             await self._send_status(ctx, content=f"Added **{added_count}** songs to queue.")
+        else:
+            await self._send_status(ctx, content="No playable songs found.")
+            return
 
         if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
             await self.play_next(ctx)

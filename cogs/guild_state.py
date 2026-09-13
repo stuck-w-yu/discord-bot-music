@@ -32,6 +32,9 @@ class GuildState:
     last_np_msg_id: Optional[int] = None
     last_status_msg_id: Optional[int] = None
     last_channel_id: Optional[int] = None
+
+    # Lifecycle state
+    is_cleaning_up: bool = False
     
     def reset_votes(self) -> None:
         """Clear all voting state for fresh track."""

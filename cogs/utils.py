@@ -3,7 +3,7 @@ import json
 import urllib.parse
 import urllib.request
 import asyncio
-import yt_dlp
+import yt_dlp  # type: ignore
 from typing import List, Optional, Any, Dict
 
 import discord
@@ -12,10 +12,11 @@ from discord.ext import commands
 
 def ensure_voice():
     async def predicate(ctx: commands.Context) -> bool:
-        if not ctx.author.voice:
+        if not isinstance(ctx.author, discord.Member) or not ctx.author.voice:
             raise commands.CommandError("You need to be in a voice channel to use this command.")
 
-        if ctx.voice_client and ctx.voice_client.channel != ctx.author.voice.channel:
+        bot_channel = getattr(ctx.voice_client, "channel", None)
+        if ctx.voice_client and bot_channel and ctx.author.voice.channel != bot_channel:
             raise commands.CommandError("You need to be in the same voice channel as the bot to use this command.")
 
         return True
@@ -168,12 +169,19 @@ async def spotify_public_queries(query: str) -> List[str]:
     return []
 
 
+_extract_cache: Optional[Any] = None
+
+
+def _get_extract_cache():
+    global _extract_cache
+    if _extract_cache is None:
+        from cogs.extract_cache import ExtractInfoCache
+        _extract_cache = ExtractInfoCache(max_size=100)
+    return _extract_cache
+
+
 async def extract_info_with_ytdl(ytdl, query: str) -> Optional[Dict[str, Any]]:
-    from cogs.extract_cache import ExtractInfoCache
-    cache = getattr(extract_info_with_ytdl, 'cache', None)
-    if cache is None:
-        cache = ExtractInfoCache(max_size=100)
-        extract_info_with_ytdl.cache = cache
+    cache = _get_extract_cache()
 
     cached_data = cache.get(query)
     if cached_data is not None:
@@ -185,37 +193,64 @@ async def extract_info_with_ytdl(ytdl, query: str) -> Optional[Dict[str, Any]]:
         return re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', value) is not None or value.startswith('www.')
 
     def _extract_with_fallback() -> Optional[Dict[str, Any]]:
+        def _is_usable(res: Any) -> bool:
+            if not isinstance(res, dict):
+                return False
+            if 'entries' in res:
+                return any(isinstance(e, dict) for e in res.get('entries', []))
+            return True
+
+        result = None
         try:
-            return ytdl.extract_info(query, download=False)
-        except Exception as primary_error:
-            message = str(primary_error)
-            if 'Requested format is not available' in message:
-                try:
-                    fallback_opts = dict(ytdl.params)
-                    fallback_opts.pop('format', None)
-                    fallback_opts.pop('extractaudio', None)
-                    fallback_opts.pop('audioformat', None)
-                    fallback_opts['skip_download'] = True
-                    fallback_opts['ignoreerrors'] = True
-                    fallback_opts['extractor_args'] = {
-                        'youtube': {
-                            'player_client': ['android', 'web', 'tv']
-                        }
-                    }
-                    with yt_dlp.YoutubeDL(fallback_opts) as fallback_ytdl:
-                        result = fallback_ytdl.extract_info(query, download=False)
-                        if result:
-                            return result
+            result = ytdl.extract_info(query, download=False)
+            if _is_usable(result):
+                return result
+        except Exception:
+            pass
 
-                    if not _looks_like_url(query) and not query.startswith('ytsearch:') and not query.startswith('ytsearch1:'):
-                        with yt_dlp.YoutubeDL(fallback_opts) as fallback_ytdl:
-                            return fallback_ytdl.extract_info(f"ytsearch5:{query}", download=False)
-                except Exception as fallback_error:
-                    print(f"Fallback extract failed for {query}: {fallback_error}")
-                    return None
+        # If primary failed or returned unusable data (e.g. HTTP 400 Bad Request from stale cookies)
+        fallback_opts = dict(ytdl.params)
+        fallback_opts.pop('format', None)
+        fallback_opts.pop('extractaudio', None)
+        fallback_opts.pop('audioformat', None)
+        fallback_opts['skip_download'] = True
+        fallback_opts['ignoreerrors'] = True
+        fallback_opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['android', 'web', 'tv']
+            }
+        }
 
-            print(f"Failed to extract info for {query}: {primary_error}")
-            return None
+        # Step 1: Retry without cookiefile (stale/expired cookies frequently trigger HTTP 400 on searches)
+        if 'cookiefile' in fallback_opts:
+            clean_opts = dict(fallback_opts)
+            clean_opts.pop('cookiefile', None)
+            try:
+                with yt_dlp.YoutubeDL(clean_opts) as fallback_ytdl:
+                    fb_res = fallback_ytdl.extract_info(query, download=False)
+                    if _is_usable(fb_res):
+                        return fb_res
+                    if not _looks_like_url(query) and not query.startswith('ytsearch'):
+                        fb_res = fallback_ytdl.extract_info(f"ytsearch5:{query}", download=False)
+                        if _is_usable(fb_res):
+                            return fb_res
+            except Exception:
+                pass
+
+        # Step 2: Retry with client fallbacks
+        try:
+            with yt_dlp.YoutubeDL(fallback_opts) as fallback_ytdl:
+                fb_res = fallback_ytdl.extract_info(query, download=False)
+                if _is_usable(fb_res):
+                    return fb_res
+                if not _looks_like_url(query) and not query.startswith('ytsearch'):
+                    fb_res = fallback_ytdl.extract_info(f"ytsearch5:{query}", download=False)
+                    if _is_usable(fb_res):
+                        return fb_res
+        except Exception:
+            pass
+
+        return result if _is_usable(result) else None
 
     try:
         data = await loop.run_in_executor(None, _extract_with_fallback)
